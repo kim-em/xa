@@ -24,8 +24,14 @@ def _tty() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
+# Set to False to force plain output regardless of the terminal, for consumers
+# that do their own styling (the TUI) or none at all (a pipe).
+_COLOUR: bool | None = None
+
+
 def paint(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m" if _tty() else text
+    use = _tty() if _COLOUR is None else _COLOUR
+    return f"\033[{code}m{text}\033[0m" if use else text
 
 
 def dim(text: str) -> str:
@@ -155,8 +161,19 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     return "\n".join(out)
 
 
-def render_detail(item: dict[str, Any]) -> str:
+def render_detail(item: dict[str, Any], colour: bool | None = None) -> str:
     """Everything the check already knows, so an escalation need not re-derive it."""
+    import json
+
+    global _COLOUR
+    previous, _COLOUR = _COLOUR, colour
+    try:
+        return _render_detail(item)
+    finally:
+        _COLOUR = previous
+
+
+def _render_detail(item: dict[str, Any]) -> str:
     import json
 
     now = utcnow()

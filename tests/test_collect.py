@@ -1,0 +1,99 @@
+"""Collection behaviour, especially what the snapshot is."""
+
+import json
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+
+from xa.collect import collect, write_snapshot, read_snapshot
+from xa.config import Config, MonitorSpec
+from xa.model import MonitorReport, Observation, utcnow
+from xa.policy import Thresholds
+from xa.store import Store
+
+
+def store(tmp_path) -> Store:
+    return Store(tmp_path / "xa.db")
+
+
+def spec(name="m", **kw) -> MonitorSpec:
+    return MonitorSpec(name=name, exec=f"monitors/{name}",
+                       interval=kw.pop("interval", timedelta(hours=1)),
+                       thresholds=kw.pop("thresholds", Thresholds(ttl=timedelta(hours=6))), **kw)
+
+
+def cfg(tmp_path, *specs) -> Config:
+    c = Config(root=tmp_path)
+    for s in specs:
+        c.monitors[s.name] = s
+    return c
+
+
+def report(monitor="m", key="k", **kw) -> MonitorReport:
+    return MonitorReport(monitor=monitor, collected_at=kw.pop("at", utcnow()),
+                         observations=[Observation(key=key, title="t", since=utcnow())])
+
+
+def test_snapshot_survives_a_tick_where_nothing_is_due(tmp_path):
+    """The snapshot is the current picture, not a log of the last tick.
+
+    Rebuilding it from only what just ran erased every monitor that happened not
+    to be scheduled, which reads to the user as "all clear".
+    """
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    st.save_report(report())
+    st.record_run("m", utcnow(), True, None, 5)
+
+    snapshot = collect(c, st)          # nothing is due; the report should stand
+    assert [i.obs.key for i in snapshot.items] == ["k"]
+
+
+def test_a_deleted_monitor_disappears(tmp_path):
+    """Removing a monitor from config should not leave its items frozen forever."""
+    st = store(tmp_path)
+    st.save_report(report(monitor="gone"))
+    snapshot = collect(cfg(tmp_path), st)
+    assert snapshot.items == []
+
+
+def test_a_stale_report_goes_unknown_rather_than_stays_ok(tmp_path):
+    st = store(tmp_path)
+    old = report(at=utcnow() - timedelta(hours=12))
+    st.save_report(old)
+    st.record_run("m", old.collected_at, True, None, 5)
+    snapshot = collect(cfg(tmp_path, spec("m")), st)
+    assert [i.severity for i in snapshot.items] == ["unknown"]
+
+
+def test_first_seen_supplies_a_missing_start_time(tmp_path):
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    r = MonitorReport(monitor="m", observations=[Observation(key="k", title="t")])  # no `since`
+    snapshot = collect(c, st, reports=[r])
+    assert snapshot.items[0].obs.since is not None
+
+
+def test_first_seen_is_stable_across_collections(tmp_path):
+    """An unchanged problem must keep ageing, not reset its clock every run."""
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    make = lambda: MonitorReport(monitor="m", observations=[Observation(key="k", title="t")])
+    first = collect(c, st, reports=[make()]).items[0].obs.since
+    second = collect(c, st, reports=[make()]).items[0].obs.since
+    assert first == second
+
+
+def test_snapshot_round_trips_atomically(tmp_path):
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    snapshot = collect(c, st, reports=[report()])
+    path = tmp_path / "snap.json"
+    write_snapshot(snapshot, path)
+    assert read_snapshot(path)["items"][0]["key"] == "k"
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_a_missing_executable_reports_unknown_not_health(tmp_path):
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    snapshot = collect(c, st, force=True)
+    assert len(snapshot.items) == 1
+    assert snapshot.items[0].severity == "unknown"
+    assert snapshot.count == 0        # our bug, not the world's

@@ -11,8 +11,10 @@ and a sync, while the checked-in files remain the readable statement of intent.
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -79,6 +81,15 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_lookup ON runs (monitor, collected_at);
 
+-- The most recent report from each monitor, kept so the snapshot survives ticks
+-- where nothing was due. Rebuilding it from only what just ran would erase every
+-- monitor that happened not to be scheduled, which reads as "all clear".
+CREATE TABLE IF NOT EXISTS latest_reports (
+    monitor      TEXT PRIMARY KEY,
+    collected_at TEXT NOT NULL,
+    payload      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS actions_log (
     ts       TEXT NOT NULL,
     uid      TEXT NOT NULL,
@@ -90,20 +101,46 @@ CREATE TABLE IF NOT EXISTS actions_log (
 """
 
 
+def synchronised(fn):
+    """Serialise access to the connection.
+
+    The daemon runs collection in a worker thread while serving HTTP on the
+    event loop, so one connection is genuinely reached from several threads.
+    sqlite3 forbids that by default; WAL plus a lock is the simple, correct
+    alternative to a connection pool for a database this small.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path, isolation_level=None)
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()
+
+    def execute(self, sql: str, params: tuple = ()):
+        """Escape hatch for callers that need raw SQL, still serialised."""
+        with self._lock:
+            return self.db.execute(sql, params)
 
     # -- suppressions -----------------------------------------------------
 
+    @synchronised
     def suppress(
         self,
         uid: str,
@@ -121,10 +158,12 @@ class Store:
             (uid, state_key, disposition, until.isoformat() if until else None, note, utcnow().isoformat()),
         )
 
+    @synchronised
     def unsuppress(self, uid: str) -> int:
         cur = self.db.execute("DELETE FROM suppressions WHERE uid = ?", (uid,))
         return cur.rowcount
 
+    @synchronised
     def suppressions(self) -> list[Suppression]:
         rows = self.db.execute("SELECT * FROM suppressions").fetchall()
         return [
@@ -138,6 +177,7 @@ class Store:
             for r in rows
         ]
 
+    @synchronised
     def prune_suppressions(self, now: datetime | None = None) -> int:
         """Drop suppressions whose expiry has passed.
 
@@ -152,6 +192,7 @@ class Store:
 
     # -- modes and threshold overrides ------------------------------------
 
+    @synchronised
     def set_mode(self, monitor: str, mode: str) -> None:
         self.db.execute(
             "INSERT INTO modes (monitor, mode, updated_at) VALUES (?,?,?)"
@@ -159,9 +200,11 @@ class Store:
             (monitor, mode, utcnow().isoformat()),
         )
 
+    @synchronised
     def modes(self) -> dict[str, str]:
         return {r["monitor"]: r["mode"] for r in self.db.execute("SELECT * FROM modes")}
 
+    @synchronised
     def set_override(self, monitor: str, name: str, value: Any) -> None:
         self.db.execute(
             "INSERT INTO overrides (monitor, name, value, updated_at) VALUES (?,?,?,?)"
@@ -169,14 +212,46 @@ class Store:
             (monitor, name, json.dumps(value), utcnow().isoformat()),
         )
 
+    @synchronised
     def overrides(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for r in self.db.execute("SELECT * FROM overrides"):
             out.setdefault(r["monitor"], {})[r["name"]] = json.loads(r["value"])
         return out
 
+    # -- latest reports ---------------------------------------------------
+
+    @synchronised
+    def save_report(self, report) -> None:
+        self.db.execute(
+            "INSERT INTO latest_reports (monitor, collected_at, payload) VALUES (?,?,?)"
+            " ON CONFLICT(monitor) DO UPDATE SET"
+            " collected_at=excluded.collected_at, payload=excluded.payload",
+            (report.monitor, report.collected_at.isoformat(), json.dumps(report.to_json())),
+        )
+
+    @synchronised
+    def latest_reports(self, known: set[str] | None = None) -> list[dict]:
+        """Every monitor's most recent report, newest state per monitor.
+
+        `known` drops reports from monitors that no longer exist in config, so
+        deleting a monitor makes its items disappear rather than freeze.
+        """
+        rows = self.db.execute("SELECT monitor, payload FROM latest_reports").fetchall()
+        out = []
+        for r in rows:
+            if known is not None and r["monitor"] not in known:
+                continue
+            out.append(json.loads(r["payload"]))
+        return out
+
+    @synchronised
+    def forget_report(self, monitor: str) -> None:
+        self.db.execute("DELETE FROM latest_reports WHERE monitor = ?", (monitor,))
+
     # -- first seen -------------------------------------------------------
 
+    @synchronised
     def note_first_seen(self, monitor: str, key: str, state_key: str, now: datetime) -> datetime:
         """Record and return when this exact situation was first observed."""
         self.db.execute(
@@ -189,18 +264,21 @@ class Store:
         ).fetchone()
         return parse_ts(row["first_seen"]) or now
 
+    @synchronised
     def forget_first_seen(self, keep: timedelta = timedelta(days=180)) -> int:
         cutoff = (utcnow() - keep).isoformat()
         return self.db.execute("DELETE FROM first_seen WHERE first_seen < ?", (cutoff,)).rowcount
 
     # -- history ----------------------------------------------------------
 
+    @synchronised
     def record_run(self, monitor: str, collected_at: datetime, ok: bool, error: str | None, duration_ms: int) -> None:
         self.db.execute(
             "INSERT INTO runs (monitor, collected_at, ok, error, duration_ms) VALUES (?,?,?,?,?)",
             (monitor, collected_at.isoformat(), int(ok), error, duration_ms),
         )
 
+    @synchronised
     def record_items(self, items: Iterable[Any], now: datetime | None = None) -> None:
         now = (now or utcnow()).isoformat()
         self.db.executemany(
@@ -211,6 +289,7 @@ class Store:
             ],
         )
 
+    @synchronised
     def last_run(self, monitor: str) -> datetime | None:
         row = self.db.execute(
             "SELECT collected_at FROM runs WHERE monitor = ? ORDER BY collected_at DESC LIMIT 1",
@@ -218,6 +297,7 @@ class Store:
         ).fetchone()
         return parse_ts(row["collected_at"]) if row else None
 
+    @synchronised
     def metric_series(self, monitor: str, key: str, metric: str, since: datetime) -> list[tuple[datetime, float]]:
         """Past values of one metric, for trend detection."""
         rows = self.db.execute(
@@ -231,6 +311,7 @@ class Store:
                 out.append((parse_ts(r["ts"]), float(value)))
         return out
 
+    @synchronised
     def prune_history(self, keep: timedelta = timedelta(days=400)) -> int:
         cutoff = (utcnow() - keep).isoformat()
         cur = self.db.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
@@ -239,6 +320,7 @@ class Store:
 
     # -- action log -------------------------------------------------------
 
+    @synchronised
     def log_action(self, uid: str, action: str, agent: str, mode: str, detail: str = "") -> None:
         self.db.execute(
             "INSERT INTO actions_log (ts, uid, action, agent, mode, detail) VALUES (?,?,?,?,?,?)",

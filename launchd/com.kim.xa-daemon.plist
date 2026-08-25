@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kim.xa-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kim/projects/xa/.venv/bin/xa-daemon</string>
+        <!-- Bind to the tailscale interface so other machines can read the
+             snapshot and post acknowledgements. 127.0.0.1 keeps it local. -->
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8787</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>XA_POLICY</key>
+        <string>/Users/kim/metacortex/xa</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kim/.local/state/xa/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kim/.local/state/xa/daemon.log</string>
+</dict>
+</plist>

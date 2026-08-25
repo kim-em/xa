@@ -96,6 +96,29 @@ The contract:
   keeps reads instant.
 - Fail loudly. A crashed monitor reports `unknown`; it never reports health.
 
+## Running it continuously
+
+One host collects; every other machine reads a cached copy.
+
+```sh
+scripts/install.sh daemon    # on the collecting host
+scripts/install.sh client    # everywhere else
+```
+
+The daemon runs monitors on their schedules, writes `snapshot.json`, and serves
+it over HTTP. `xa-sync` pulls that snapshot to `~/.cache/xa` every thirty
+seconds, so `xa` reads a local file and never touches the network. A test
+asserts the read path opens no socket.
+
+Writes go the other way. An acknowledgement is sent to the daemon, and if that
+fails it queues in `~/.cache/xa/outbox.jsonl` for `xa-sync` to deliver later.
+The local snapshot updates immediately either way, so acknowledging something
+on a plane behaves exactly like acknowledging it at a desk.
+
+```sh
+xa tui                       # the same verbs, one keystroke each
+```
+
 ## Layout
 
 ```
@@ -106,6 +129,12 @@ src/xa/store.py     sqlite: acks, snoozes, modes, overrides, history
 src/xa/collect.py   running monitors, building the snapshot
 src/xa/render.py    terminal output (pure stdlib, so startup stays instant)
 src/xa/cli.py       the `xa` command
+src/xa/actions.py   prompt rendering and session launching
+src/xa/template.py  the small mustache subset prompts are written in
+src/xa/daemon.py    the collector loop
+src/xa/server.py    HTTP: snapshot out, acknowledgements in
+src/xa/sync.py      client-side cache refresh and outbox drain
+src/xa/tui.py       the interactive view
 ```
 
 ## Install

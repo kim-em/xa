@@ -163,7 +163,17 @@ def collect(
                 continue
             report, duration_ms = run_monitor(spec, cfg)
             store.record_run(name, report.collected_at, report.ok, report.error, duration_ms)
+            store.save_report(report)
             collected.append(report)
+
+        # The snapshot is the current picture, not a log of this tick. Monitors
+        # that were not due still hold: their last report stands until it ages
+        # past its TTL, at which point the engine marks it unknown rather than
+        # letting it quietly keep asserting health.
+        fresh = {r.monitor for r in collected}
+        for raw in store.latest_reports(known=set(cfg.monitors)):
+            if raw["monitor"] not in fresh:
+                collected.append(MonitorReport.from_json(raw))
 
     policies = effective_policies(cfg, store)
     store.prune_suppressions(now)
