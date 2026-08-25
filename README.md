@@ -31,6 +31,8 @@ Three kinds of thing, because they need different treatment:
 
 ## Using it
 
+`xa help` explains the model; `xa --help` lists the flags.
+
 ```sh
 xa                          # what needs me, right now
 xa --json                   # the same, for scripts, a menu bar, or a bot

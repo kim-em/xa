@@ -350,6 +350,13 @@ def cmd_prompt(args) -> int:
     raise SystemExit(f"xa: no action named {args.action!r}")
 
 
+def cmd_help(args) -> int:
+    from .help import render
+
+    print(render(args.topic))
+    return 0
+
+
 def cmd_tui(args) -> int:
     from .tui import main as tui_main
 
@@ -469,6 +476,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("prompt", cmd_prompt, "open an action's prompt template")
     s.add_argument("action")
     s.add_argument("--path", action="store_true")
+
+    s = add("help", cmd_help, "how xa works (not just what its flags are)")
+    s.add_argument("topic", nargs="?",
+                   help="model, snooze, actions, monitors, thresholds, autonomy")
 
     add("tui", cmd_tui, "interactive view: same verbs, one keystroke each")
     add("doctor", cmd_doctor, "check the installation")
