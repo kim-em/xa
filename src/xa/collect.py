@@ -49,6 +49,15 @@ def _env_for(spec: MonitorSpec, cfg: Config) -> dict[str, str]:
     env = dict(os.environ)
     env["XA_POLICY"] = str(cfg.root)
     env["XA_MONITOR"] = spec.name
+    # Let monitors `import xa` without knowing where the engine is installed.
+    # Hardcoding a source path in each monitor makes the policy directory
+    # non-portable, which matters because the collector runs on a different
+    # machine from the one they were written on.
+    import xa as _xa
+
+    engine = str(Path(_xa.__file__).resolve().parent.parent)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{engine}{os.pathsep}{existing}" if existing else engine
     for key, value in spec.options.items():
         env[f"XA_OPT_{key.upper()}"] = value if isinstance(value, str) else json.dumps(value)
     return env
