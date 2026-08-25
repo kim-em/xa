@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from .config import Config, MonitorSpec
 from .model import Item, MonitorReport, utcnow
@@ -145,12 +145,36 @@ def due(spec: MonitorSpec, store: Store, now: datetime) -> bool:
     return last is None or (now - last) >= spec.interval
 
 
+def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) -> Snapshot:
+    """Build the current picture from whatever each monitor last reported."""
+    now = now or utcnow()
+    reports = [MonitorReport.from_json(raw) for raw in store.latest_reports(known=set(cfg.monitors))]
+    policies = effective_policies(cfg, store)
+    items = build_items(reports, policies, store.suppressions(), now=now)
+    items.sort(key=lambda i: sort_key(i, now))
+    return Snapshot(
+        generated_at=now,
+        items=items,
+        monitors=[
+            {
+                "name": r.monitor,
+                "ok": r.ok,
+                "collected_at": r.collected_at.isoformat(),
+                "error": r.error,
+                "mode": (policies.get(r.monitor) or MonitorPolicy(r.monitor)).mode,
+            }
+            for r in reports
+        ],
+    )
+
+
 def collect(
     cfg: Config,
     store: Store,
     only: Sequence[str] | None = None,
     force: bool = False,
     reports: Iterable[MonitorReport] | None = None,
+    on_progress: "Callable[[Snapshot], None] | None" = None,
 ) -> Snapshot:
     """Run every due monitor and build the snapshot.
 
@@ -174,6 +198,11 @@ def collect(
             store.record_run(name, report.collected_at, report.ok, report.error, duration_ms)
             store.save_report(report)
             collected.append(report)
+            if on_progress is not None:
+                # Publish after every monitor, not at the end of the pass. A
+                # full sweep takes minutes, and a cold start that shows nothing
+                # until it finishes is indistinguishable from a broken tool.
+                on_progress(snapshot_from_store(cfg, store))
 
         # The snapshot is the current picture, not a log of this tick. Monitors
         # that were not due still hold: their last report stands until it ages

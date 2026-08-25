@@ -9,11 +9,13 @@ ROLE="${1:-client}"   # `daemon` on the collecting host, `client` everywhere els
 cd "$ROOT"
 
 echo "==> virtualenv"
+# Creating the environment is the only non-idempotent step, so guard it rather
+# than clearing: re-running install.sh should never throw away a working venv.
 if command -v uv >/dev/null; then
-    uv venv --quiet .venv
+    [ -d .venv ] || uv venv --quiet .venv
     uv pip install --quiet -e ".[tui]"
 else
-    python3 -m venv .venv
+    [ -d .venv ] || python3 -m venv .venv
     .venv/bin/pip install --quiet -e ".[tui]"
 fi
 

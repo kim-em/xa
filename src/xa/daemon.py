@@ -37,7 +37,10 @@ async def collector(cfg: Config, store: Store, snapshot_path: Path, once: bool =
     loop = asyncio.get_running_loop()
     while True:
         try:
-            snapshot = await loop.run_in_executor(None, lambda: collect(cfg, store))
+            snapshot = await loop.run_in_executor(
+                None,
+                lambda: collect(cfg, store, on_progress=lambda s: write_snapshot(s, snapshot_path)),
+            )
             write_snapshot(snapshot, snapshot_path)
             log.info("snapshot: %d item(s), %d fault(s)", len(snapshot.items), snapshot.count)
         except Exception:
