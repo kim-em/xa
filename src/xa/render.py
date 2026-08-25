@@ -202,6 +202,12 @@ def _render_detail(item: dict[str, Any]) -> str:
         out += ["", paint("  actions", "1"), "    " + " ".join(item["actions"])]
     if item.get("plan"):
         out += ["", paint("  plan", "1"), *("    " + ln for ln in item["plan"].splitlines())]
+    members = (item.get("evidence") or {}).get("cluster_members")
+    if members:
+        out += ["", paint(f"  clustered with {len(members)} other(s)", "1")]
+        for m in members[:20]:
+            when = (m.get("since") or "")[:10]
+            out.append(f"    {when:12} {m['title'][:80]}")
     if item.get("evidence"):
         out += ["", paint("  evidence", "1")]
         for line in json.dumps(item["evidence"], indent=2).splitlines():

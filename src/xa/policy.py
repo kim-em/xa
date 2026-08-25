@@ -249,6 +249,14 @@ def cluster(items: Sequence[Item]) -> list[Item]:
             head.severity = item.severity
         if item.obs.since and (head.obs.since is None or item.obs.since < head.obs.since):
             head.obs.since = item.obs.since
+        # Keep the members. Collapsing a group and discarding what was in it
+        # makes the row unanswerable: "13 things, oldest 123 days" tells you
+        # nothing about whether any of them is yours or even real.
+        head.obs.evidence.setdefault("cluster_members", []).append(
+            {"key": item.obs.key, "title": item.obs.title,
+             "since": item.obs.since.isoformat() if item.obs.since else None,
+             "url": item.obs.url}
+        )
     return out
 
 

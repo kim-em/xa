@@ -199,3 +199,18 @@ def test_only_faults_past_a_threshold_count():
     )
     items = build_items([report], policies, now=NOW)
     assert sum(1 for i in items if i.counts) == 1
+
+
+def test_cluster_keeps_its_members():
+    """Collapsing a group must not discard what was in it.
+
+    A row reading "13 things, oldest 123 days" is unanswerable: you cannot tell
+    whether any of them is yours, or current, or real. That is how a cluster
+    becomes noise rather than a summary.
+    """
+    a = Item(monitor="m", obs=obs(key="a", title="first", cluster="batch", since=NOW))
+    b = Item(monitor="m", obs=obs(key="b", title="second", cluster="batch", since=NOW))
+    head = cluster([a, b])[0]
+    members = head.obs.evidence["cluster_members"]
+    assert [m["title"] for m in members] == ["second"]
+    assert head.cluster_size == 2
