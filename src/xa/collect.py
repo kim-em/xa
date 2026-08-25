@@ -142,10 +142,12 @@ def effective_policies(cfg: Config, store: Store | None) -> dict[str, MonitorPol
         if name in modes:
             policy.mode = modes[name]
         for field_name, value in (overrides.get(name) or {}).items():
-            if field_name in ("warn_after", "alert_after", "ttl"):
-                setattr(policy.thresholds, field_name, parse_duration(value))
-            elif field_name == "push":
-                policy.thresholds.push = bool(value)
+            targets = [policy.thresholds, *policy.key_thresholds.values()]
+            for target in targets:
+                if field_name in ("warn_after", "alert_after", "ttl"):
+                    setattr(target, field_name, parse_duration(value))
+                elif field_name == "push":
+                    target.push = bool(value)
     return policies
 
 

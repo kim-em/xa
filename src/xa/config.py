@@ -94,6 +94,8 @@ class MonitorSpec:
     timeout: timedelta = timedelta(minutes=10)
     enabled: bool = True
     thresholds: Thresholds = field(default_factory=Thresholds)
+    # Keyed by observation-key prefix; see MonitorPolicy.thresholds_for.
+    key_thresholds: dict[str, Thresholds] = field(default_factory=dict)
     mode: str = "report"
     actions: dict[str, Action] = field(default_factory=dict)
     # Passed to the monitor as XA_OPT_* environment variables, so a monitor can
@@ -104,7 +106,8 @@ class MonitorSpec:
 
     @property
     def policy(self) -> MonitorPolicy:
-        return MonitorPolicy(name=self.name, thresholds=self.thresholds, mode=self.mode)
+        return MonitorPolicy(name=self.name, thresholds=self.thresholds, mode=self.mode,
+                             key_thresholds=dict(self.key_thresholds))
 
 
 @dataclass(slots=True)
@@ -153,6 +156,18 @@ def load(root: Path | None = None) -> Config:
 
     for name, block in (raw.get("monitor") or {}).items():
         interval = parse_duration(block.get("interval")) or DEFAULT_INTERVAL
+
+        # A `thresholds` table may contain scalars (the monitor default) and
+        # sub-tables (per-key overrides). TOML makes them indistinguishable
+        # without looking, so split on type.
+        raw_thresholds = block.get("thresholds") or {}
+        defaults = {k: v for k, v in raw_thresholds.items() if not isinstance(v, dict)}
+        key_thresholds = {
+            prefix: Thresholds.from_config({**defaults, **override}, interval)
+            for prefix, override in raw_thresholds.items()
+            if isinstance(override, dict)
+        }
+
         actions = {}
         for a in block.get("actions") or []:
             action = Action.from_config(a)
@@ -165,7 +180,8 @@ def load(root: Path | None = None) -> Config:
             interval=interval,
             timeout=parse_duration(block.get("timeout")) or timedelta(minutes=10),
             enabled=bool(block.get("enabled", True)),
-            thresholds=Thresholds.from_config(block.get("thresholds"), interval),
+            thresholds=Thresholds.from_config(defaults, interval),
+            key_thresholds=key_thresholds,
             mode=str(block.get("mode", "report")),
             actions=actions,
             options=dict(block.get("options") or {}),

@@ -263,6 +263,19 @@ class MonitorPolicy:
     name: str
     thresholds: Thresholds = field(default_factory=Thresholds)
     mode: str = "report"
+    # Overrides matched against the start of an observation's key. One monitor
+    # often reports several kinds of thing that deserve different deadlines:
+    # a branch nobody has created is not urgent on the same timescale as a
+    # build that has just gone red.
+    key_thresholds: dict[str, Thresholds] = field(default_factory=dict)
+
+    def thresholds_for(self, key: str) -> Thresholds:
+        """The most specific matching override, or the monitor default."""
+        best, best_len = self.thresholds, -1
+        for prefix, thresholds in self.key_thresholds.items():
+            if key.startswith(prefix) and len(prefix) > best_len:
+                best, best_len = thresholds, len(prefix)
+        return best
 
 
 def build_items(
@@ -307,7 +320,7 @@ def build_items(
                 Item(
                     monitor=report.monitor,
                     obs=obs,
-                    severity=severity_for(obs, policy.thresholds, now, stale=stale),
+                    severity=severity_for(obs, policy.thresholds_for(obs.key), now, stale=stale),
                     mode=policy.mode,
                 )
             )
