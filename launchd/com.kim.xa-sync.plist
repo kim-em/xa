@@ -7,12 +7,15 @@
 
     <!-- Pulls the snapshot to ~/.cache/xa so that `xa` never touches the
          network, and drains any acknowledgements made while disconnected.
-         Install this on every machine except the one running the daemon. -->
+         Install this on every machine except the one running the daemon.
+         The tailscale address rather than the hostname: the daemon binds only
+         to the tailnet, and plain DNS may resolve the name to a LAN address
+         nothing is listening on. -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/kim/projects/xa/.venv/bin/xa-sync</string>
         <string>--url</string>
-        <string>http://carica:8787</string>
+        <string>http://100.122.142.62:8787</string>
         <string>--interval</string>
         <string>30</string>
     </array>
