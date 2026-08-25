@@ -1,0 +1,24 @@
+[project]
+name = "xa"
+version = "0.1.0"
+description = "External amygdala: know what is on fire without being asked"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "aiosqlite>=0.20",
+]
+
+[project.optional-dependencies]
+tui = ["textual>=0.80"]
+
+[project.scripts]
+xa = "xa.cli:main"
+xa-daemon = "xa.daemon:main"
+xa-sync = "xa.sync:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

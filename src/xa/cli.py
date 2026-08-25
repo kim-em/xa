@@ -1,0 +1,353 @@
+"""The `xa` command.
+
+Reads come from a precomputed snapshot on local disk and touch nothing else:
+no socket, no subprocess, no clock-consuming work. Asking must never start
+work, or the whole design collapses into "wait while I go and look".
+
+Writes are a different matter, and are allowed to be slow.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+from . import config as config_mod
+from .model import utcnow
+from .policy import parse_duration, parse_when
+
+
+def snapshot_path() -> Path:
+    return config_mod.cache_dir() / "snapshot.json"
+
+
+def db_path() -> Path:
+    return config_mod.state_dir() / "xa.db"
+
+
+def _load_snapshot() -> dict[str, Any]:
+    from .collect import read_snapshot
+
+    snap = read_snapshot(snapshot_path())
+    if snap is None:
+        return {"version": 1, "generated_at": None, "count": 0, "items": [], "monitors": []}
+    return snap
+
+
+def _find(snapshot: dict[str, Any], needle: str) -> dict[str, Any]:
+    """Resolve a uid, a bare key, or an unambiguous prefix."""
+    items = snapshot.get("items", [])
+    exact = [i for i in items if i["uid"] == needle]
+    if exact:
+        return exact[0]
+    partial = [i for i in items if needle in i["uid"]]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise SystemExit(f"xa: no item matching {needle!r} (try `xa` to list them)")
+    names = "\n  ".join(i["uid"] for i in partial)
+    raise SystemExit(f"xa: {needle!r} is ambiguous:\n  {names}")
+
+
+def _store():
+    from .store import Store
+
+    return Store(db_path())
+
+
+def _mark(args, disposition: str, until_text: str | None, note: str = "") -> int:
+    """Shared implementation of ack, snooze and mute."""
+    snapshot = _load_snapshot()
+    item = _find(snapshot, args.item)
+    cfg = config_mod.load()
+
+    if disposition == "muted":
+        # A false positive will never be right, so it binds to every state.
+        state_key, until = "*", None
+    elif disposition == "acked":
+        # "I'll deal with this": silence until the failure becomes a different
+        # failure, with a long but finite expiry so nothing is lost forever.
+        state_key, until = item["state_key"], utcnow() + cfg.ack_expiry
+    else:
+        state_key = item["state_key"]
+        until = parse_when(until_text, hour=cfg.snooze_hour)
+
+    store = _store()
+    store.suppress(item["uid"], state_key, disposition, until, note)
+
+    # Update the local snapshot optimistically, so the next read reflects this
+    # immediately even if the daemon is unreachable.
+    for i in snapshot.get("items", []):
+        if i["uid"] == item["uid"]:
+            i["disposition"] = disposition
+            i["suppressed_until"] = until.isoformat() if until else None
+            i["counts"] = False
+    from .collect import write_snapshot
+
+    snapshot_path().parent.mkdir(parents=True, exist_ok=True)
+    tmp = snapshot_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(snapshot, indent=1))
+    tmp.replace(snapshot_path())
+
+    when = f" until {until.astimezone().strftime('%a %d %b %H:%M')}" if until else ""
+    print(f"{disposition}: {item['uid']}{when}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_status(args) -> int:
+    snapshot = _load_snapshot()
+    if args.json:
+        json.dump(snapshot, sys.stdout, indent=1)
+        print()
+        return 0
+    from .render import render
+
+    print(render(snapshot, show_all=args.all))
+    return 0
+
+
+def cmd_why(args) -> int:
+    snapshot = _load_snapshot()
+    item = _find(snapshot, args.item)
+    if args.json:
+        json.dump(item, sys.stdout, indent=1)
+        print()
+        return 0
+    from .render import render_detail
+
+    print(render_detail(item))
+    return 0
+
+
+def cmd_ack(args) -> int:
+    return _mark(args, "acked", None, args.note or "")
+
+
+def cmd_snooze(args) -> int:
+    return _mark(args, "snoozed", args.when, args.note or "")
+
+
+def cmd_mute(args) -> int:
+    return _mark(args, "muted", None, args.note or "")
+
+
+def cmd_unmute(args) -> int:
+    snapshot = _load_snapshot()
+    try:
+        uid = _find(snapshot, args.item)["uid"]
+    except SystemExit:
+        uid = args.item
+    removed = _store().unsuppress(uid)
+    print(f"cleared {removed} suppression(s) for {uid}")
+    return 0
+
+
+def cmd_suppressions(args) -> int:
+    now = utcnow()
+    rows = _store().suppressions()
+    if not rows:
+        print("no suppressions")
+        return 0
+    for s in sorted(rows, key=lambda s: s.uid):
+        until = s.until.astimezone().strftime("%a %d %b %H:%M") if s.until else "further notice"
+        scope = "any state" if s.state_key == "*" else s.state_key
+        live = "" if s.active_at(now) else "  (expired)"
+        print(f"{s.disposition:<9} {s.uid:<38} {scope:<18} until {until}{live}")
+    return 0
+
+
+def cmd_mode(args) -> int:
+    cfg = config_mod.load()
+    store = _store()
+    if args.mode is None:
+        modes = store.modes()
+        for name, spec in sorted(cfg.monitors.items()):
+            print(f"{name:<24} {modes.get(name, spec.mode)}")
+        return 0
+    if args.mode not in ("report", "investigate", "auto"):
+        raise SystemExit("xa: mode must be report, investigate or auto")
+    cfg.monitor(args.monitor)  # validate the name
+    if args.mode == "auto" and not cfg.autonomy_enabled:
+        print("note: autonomy_enabled is false in config.toml, so `auto` stays inert", file=sys.stderr)
+    store.set_mode(args.monitor, args.mode)
+    print(f"{args.monitor}: mode = {args.mode}")
+    return 0
+
+
+def cmd_threshold(args) -> int:
+    cfg = config_mod.load()
+    if "." not in args.name:
+        raise SystemExit("xa: expected <monitor>.<threshold>, e.g. bump-branches.alert_after")
+    monitor, field = args.name.split(".", 1)
+    spec = cfg.monitor(monitor)
+    if field not in ("warn_after", "alert_after", "ttl", "push"):
+        raise SystemExit("xa: threshold must be warn_after, alert_after, ttl or push")
+
+    if args.value is None:
+        th = spec.thresholds
+        current = {"warn_after": th.warn_after, "alert_after": th.alert_after, "ttl": th.ttl, "push": th.push}
+        live = (_store().overrides().get(monitor) or {}).get(field)
+        print(f"{args.name} = {current[field]}" + (f"  (override: {live})" if live is not None else ""))
+        return 0
+
+    if args.value in ("default", "unset", "-"):
+        _store().db.execute("DELETE FROM overrides WHERE monitor=? AND name=?", (monitor, field))
+        print(f"{args.name} back to the config default")
+        return 0
+
+    if field == "push":
+        value: Any = args.value.lower() in ("1", "true", "yes", "on")
+    else:
+        parse_duration(args.value)  # validate before storing
+        value = args.value
+    _store().set_override(monitor, field, value)
+    print(f"{args.name} = {value}")
+    return 0
+
+
+def cmd_collect(args) -> int:
+    from .collect import collect, write_snapshot
+
+    cfg = config_mod.load()
+    store = _store()
+    snapshot = collect(cfg, store, only=args.monitors or None, force=args.force)
+    write_snapshot(snapshot, snapshot_path())
+    if args.quiet:
+        return 0
+    from .render import render
+
+    print(render(snapshot.to_json()))
+    return 0
+
+
+def cmd_config(args) -> int:
+    cfg = config_mod.load()
+    target = cfg.root / "config.toml"
+    if args.what == "suppressions":
+        target = cfg.root / "suppressions.toml"
+    if args.path:
+        print(target)
+        return 0
+    editor = os.environ.get("EDITOR", "code")
+    subprocess.run([editor, str(target)])
+    return 0
+
+
+def cmd_prompt(args) -> int:
+    """Open the markdown template an action uses, so it can be edited freely."""
+    cfg = config_mod.load()
+    for spec in cfg.monitors.values():
+        for action in spec.actions.values():
+            if action.id == args.action or f"{spec.name}.{action.id}" == args.action:
+                path = cfg.resolve(action.prompt)
+                if path is None:
+                    raise SystemExit(f"xa: action {action.id!r} has no prompt template")
+                if args.path:
+                    print(path)
+                    return 0
+                subprocess.run([os.environ.get("EDITOR", "code"), str(path)])
+                return 0
+    raise SystemExit(f"xa: no action named {args.action!r}")
+
+
+def cmd_doctor(args) -> int:
+    cfg = config_mod.load()
+    snap = snapshot_path()
+    print(f"policy dir   {cfg.root}" + ("" if cfg.root.exists() else "   (missing)"))
+    print(f"config.toml  {'present' if (cfg.root / 'config.toml').exists() else 'missing'}")
+    print(f"monitors     {len(cfg.monitors)} configured")
+    print(f"database     {db_path()}" + ("" if db_path().exists() else "   (not created yet)"))
+    print(f"snapshot     {snap}" + ("" if snap.exists() else "   (not written yet)"))
+    print(f"autonomy     {'enabled' if cfg.autonomy_enabled else 'disabled'}")
+    missing = [
+        f"{n}: {s.exec}"
+        for n, s in cfg.monitors.items()
+        if s.kind == "exec" and (cfg.resolve(s.exec) is None or not cfg.resolve(s.exec).exists())
+    ]
+    if missing:
+        print("\nmissing monitor executables:")
+        for m in missing:
+            print(f"  {m}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="xa", description="external amygdala: what is on fire")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--all", action="store_true", help="include acked, snoozed and muted items")
+    sub = p.add_subparsers(dest="command")
+
+    def add(name, fn, help_text, **kw):
+        sp = sub.add_parser(name, help=help_text, **kw)
+        sp.set_defaults(func=fn)
+        return sp
+
+    s = add("why", cmd_why, "everything known about one item")
+    s.add_argument("item")
+    s.add_argument("--json", action="store_true")
+
+    s = add("ack", cmd_ack, "I'll deal with this; quiet until the failure changes")
+    s.add_argument("item")
+    s.add_argument("--note", default="")
+
+    s = add("snooze", cmd_snooze, "tell me again later (default: tomorrow morning)")
+    s.add_argument("item")
+    s.add_argument("when", nargs="?", default="tomorrow", help="3h, 2d, tomorrow, mon, next week, 2026-09-01")
+    s.add_argument("--note", default="")
+
+    s = add("mute", cmd_mute, "false positive; never mention this again")
+    s.add_argument("item")
+    s.add_argument("--note", default="")
+
+    s = add("unmute", cmd_unmute, "clear every suppression on an item")
+    s.add_argument("item")
+
+    add("suppressions", cmd_suppressions, "list acks, snoozes and mutes")
+
+    s = add("mode", cmd_mode, "switch a monitor between report, investigate and auto")
+    s.add_argument("monitor", nargs="?")
+    s.add_argument("mode", nargs="?")
+
+    s = add("threshold", cmd_threshold, "read or set a threshold, e.g. bump-branches.alert_after 6h")
+    s.add_argument("name")
+    s.add_argument("value", nargs="?", help="a duration, or `default` to clear an override")
+
+    s = add("collect", cmd_collect, "run monitors now and rewrite the snapshot")
+    s.add_argument("monitors", nargs="*")
+    s.add_argument("--force", action="store_true", help="ignore each monitor's interval")
+    s.add_argument("--quiet", action="store_true")
+
+    s = add("config", cmd_config, "open the policy files")
+    s.add_argument("what", nargs="?", default="config", choices=["config", "suppressions"])
+    s.add_argument("--path", action="store_true", help="print the path instead of opening it")
+
+    s = add("prompt", cmd_prompt, "open an action's prompt template")
+    s.add_argument("action")
+    s.add_argument("--path", action="store_true")
+
+    add("doctor", cmd_doctor, "check the installation")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "command", None) is None:
+        return cmd_status(args)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
