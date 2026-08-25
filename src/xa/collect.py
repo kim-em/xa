@@ -151,7 +151,15 @@ def effective_policies(cfg: Config, store: Store | None) -> dict[str, MonitorPol
     return policies
 
 
-def due(spec: MonitorSpec, store: Store, now: datetime) -> bool:
+def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None) -> bool:
+    """Whether to run this monitor now.
+
+    A monitor whose definition has changed is always due: waiting out an
+    interval to see the effect of an edit is friction that stops you fixing a
+    noisy check.
+    """
+    if root is not None and store.fingerprint(spec.name) != spec.fingerprint(root):
+        return True
     last = store.last_run(spec.name)
     return last is None or (now - last) >= spec.interval
 
@@ -204,11 +212,11 @@ def collect(
                 continue
             if not spec.enabled:
                 continue
-            if not force and not due(spec, store, now):
+            if not force and not due(spec, store, now, cfg.root):
                 continue
             report, duration_ms = run_monitor(spec, cfg)
             store.record_run(name, report.collected_at, report.ok, report.error, duration_ms)
-            store.save_report(report)
+            store.save_report(report, spec.fingerprint(cfg.root))
             collected.append(report)
             if on_progress is not None:
                 # Publish after every monitor, not at the end of the pass. A

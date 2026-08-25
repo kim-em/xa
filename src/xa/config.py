@@ -10,6 +10,7 @@ repository.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -103,6 +104,23 @@ class MonitorSpec:
     options: dict[str, Any] = field(default_factory=dict)
     # Free-form fields used by declarative monitor kinds.
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def fingerprint(self, root: Path) -> str:
+        """A digest of what this monitor *is*.
+
+        Editing a monitor and waiting an hour for the change to show up is the
+        kind of friction that stops you iterating on it. When this changes, the
+        monitor is due regardless of its interval.
+        """
+        material = [self.kind, self.exec or "", repr(self.args), repr(sorted(self.options.items()))]
+        if self.exec:
+            path = root / self.exec if not Path(self.exec).is_absolute() else Path(self.exec)
+            try:
+                material.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            except OSError:
+                material.append("missing")
+        material.append(repr(self.raw.get("query")))
+        return hashlib.sha256("\x1f".join(material).encode()).hexdigest()[:16]
 
     @property
     def policy(self) -> MonitorPolicy:

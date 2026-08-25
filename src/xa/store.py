@@ -87,7 +87,8 @@ CREATE INDEX IF NOT EXISTS runs_lookup ON runs (monitor, collected_at);
 CREATE TABLE IF NOT EXISTS latest_reports (
     monitor      TEXT PRIMARY KEY,
     collected_at TEXT NOT NULL,
-    payload      TEXT NOT NULL
+    payload      TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS actions_log (
@@ -99,6 +100,12 @@ CREATE TABLE IF NOT EXISTS actions_log (
     detail   TEXT NOT NULL DEFAULT ''
 );
 """
+
+
+# Columns added after the initial schema, applied to existing databases.
+ADDED_COLUMNS = [
+    ("latest_reports", "fingerprint", "TEXT NOT NULL DEFAULT ''"),
+]
 
 
 def synchronised(fn):
@@ -128,6 +135,19 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that CREATE TABLE IF NOT EXISTS cannot.
+
+        The schema will keep changing, and an existing database must survive
+        that: a monitoring tool that needs its history deleted to take an
+        upgrade has thrown away the baseline every trend depends on.
+        """
+        for table, column, spec in ADDED_COLUMNS:
+            existing = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
 
     def close(self) -> None:
         with self._lock:
@@ -222,13 +242,21 @@ class Store:
     # -- latest reports ---------------------------------------------------
 
     @synchronised
-    def save_report(self, report) -> None:
+    def save_report(self, report, fingerprint: str = "") -> None:
         self.db.execute(
-            "INSERT INTO latest_reports (monitor, collected_at, payload) VALUES (?,?,?)"
+            "INSERT INTO latest_reports (monitor, collected_at, payload, fingerprint) VALUES (?,?,?,?)"
             " ON CONFLICT(monitor) DO UPDATE SET"
-            " collected_at=excluded.collected_at, payload=excluded.payload",
-            (report.monitor, report.collected_at.isoformat(), json.dumps(report.to_json())),
+            " collected_at=excluded.collected_at, payload=excluded.payload,"
+            " fingerprint=excluded.fingerprint",
+            (report.monitor, report.collected_at.isoformat(), json.dumps(report.to_json()), fingerprint),
         )
+
+    @synchronised
+    def fingerprint(self, monitor: str) -> str | None:
+        row = self.db.execute(
+            "SELECT fingerprint FROM latest_reports WHERE monitor = ?", (monitor,)
+        ).fetchone()
+        return row["fingerprint"] if row else None
 
     @synchronised
     def latest_reports(self, known: set[str] | None = None) -> list[dict]:

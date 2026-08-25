@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from xa.collect import collect, write_snapshot, read_snapshot
+from xa.collect import collect, due, write_snapshot, read_snapshot
 from xa.config import Config, MonitorSpec
 from xa.model import MonitorReport, Observation, utcnow
 from xa.policy import Thresholds
@@ -42,7 +42,8 @@ def test_snapshot_survives_a_tick_where_nothing_is_due(tmp_path):
     to be scheduled, which reads to the user as "all clear".
     """
     st, c = store(tmp_path), cfg(tmp_path, spec("m"))
-    st.save_report(report())
+    # Store the fingerprint too, or the monitor counts as edited and is due.
+    st.save_report(report(), c.monitors["m"].fingerprint(tmp_path))
     st.record_run("m", utcnow(), True, None, 5)
 
     snapshot = collect(c, st)          # nothing is due; the report should stand
@@ -97,3 +98,55 @@ def test_a_missing_executable_reports_unknown_not_health(tmp_path):
     assert len(snapshot.items) == 1
     assert snapshot.items[0].severity == "unknown"
     assert snapshot.count == 0        # our bug, not the world's
+
+
+def test_a_changed_monitor_is_due_regardless_of_interval(tmp_path):
+    """Editing a monitor should take effect now, not after its interval.
+
+    Waiting an hour to see whether a fix worked is what stops you fixing a
+    noisy check at all.
+    """
+    st = store(tmp_path)
+    exe = tmp_path / "monitors" / "m"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\necho '{}'\n")
+    c = cfg(tmp_path, spec("m"))
+    s = c.monitors["m"]
+
+    st.record_run("m", utcnow(), True, None, 1)
+    st.save_report(report(), s.fingerprint(tmp_path))
+    assert not due(s, st, utcnow(), tmp_path)      # unchanged: wait for the interval
+
+    exe.write_text("#!/bin/sh\necho '{\"observations\": []}'\n")
+    assert due(s, st, utcnow(), tmp_path)          # edited: run it now
+
+
+def test_changed_options_also_make_a_monitor_due(tmp_path):
+    st = store(tmp_path)
+    (tmp_path / "monitors").mkdir()
+    (tmp_path / "monitors" / "m").write_text("#!/bin/sh\n")
+    c = cfg(tmp_path, spec("m"))
+    s = c.monitors["m"]
+    st.record_run("m", utcnow(), True, None, 1)
+    st.save_report(report(), s.fingerprint(tmp_path))
+
+    s.options = {"threshold": 5}
+    assert due(s, st, utcnow(), tmp_path)
+
+
+def test_an_existing_database_survives_a_schema_change(tmp_path):
+    """History is the baseline every trend depends on, so an upgrade must not
+    require deleting it."""
+    import sqlite3
+
+    path = tmp_path / "xa.db"
+    Store(path).close()
+    # Simulate the pre-migration shape.
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE latest_reports DROP COLUMN fingerprint")
+    db.commit()
+    db.close()
+
+    st = Store(path)                        # must migrate, not crash
+    st.save_report(report(), "abc123")
+    assert st.fingerprint("m") == "abc123"
