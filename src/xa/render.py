@@ -108,6 +108,8 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
         headline = f"nothing urgent, {young} below threshold"
     else:
         headline = "nothing on fire"
+    if count and young:
+        headline += dim(f" (+{young} below threshold)")
     stale = generated is not None and (now - generated).total_seconds() > 600
     age_text = f"snapshot {age} ago"
     out.append(f"{paint('xa', '1')}  {dim('·')}  {headline}  {dim('·')}  "
@@ -119,10 +121,22 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
 
     name_w = min(34, max([len(i["uid"]) for i in items], default=20))
 
-    if faults:
+    # Split the section the same way the headline does. Printing FAULTS (4)
+    # above a headline that says 3 invites exactly one question, and the answer
+    # is that a fault below its threshold is real but not yet your problem.
+    counting = [i for i in faults if i.get("counts")]
+    waiting = [i for i in faults if not i.get("counts")]
+
+    if counting:
         out.append("")
-        out.append(paint(f"FAULTS ({len(faults)})", "1"))
-        for i in faults:
+        out.append(paint(f"FAULTS ({len(counting)})", "1"))
+        for i in counting:
+            out.extend(_row(i, now, name_w))
+
+    if waiting:
+        out.append("")
+        out.append(dim(f"below threshold ({len(waiting)}) — real, not yet urgent"))
+        for i in waiting:
             out.extend(_row(i, now, name_w))
 
     if pending:
