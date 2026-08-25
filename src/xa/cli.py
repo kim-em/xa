@@ -175,16 +175,34 @@ def cmd_unmute(args) -> int:
 
 
 def cmd_suppressions(args) -> int:
+    from .model import parse_ts
+
     now = utcnow()
-    rows = _store().suppressions()
+    # Prefer the snapshot: on a machine that is not the collector, the local
+    # database is a write-ahead log, not the truth. Showing it would let this
+    # disagree with what is actually silenced.
+    snapshot = _load_snapshot()
+    rows = snapshot.get("suppressions")
+    if rows is None:
+        rows = [
+            {"uid": s.uid, "state_key": s.state_key, "disposition": s.disposition,
+             "until": s.until.isoformat() if s.until else None, "note": s.note}
+            for s in _store().suppressions()
+        ]
     if not rows:
         print("no suppressions")
         return 0
-    for s in sorted(rows, key=lambda s: s.uid):
-        until = s.until.astimezone().strftime("%a %d %b %H:%M") if s.until else "further notice"
-        scope = "any state" if s.state_key == "*" else s.state_key
-        live = "" if s.active_at(now) else "  (expired)"
-        print(f"{s.disposition:<9} {s.uid:<38} {scope:<18} until {until}{live}")
+    if args.json:
+        json.dump(rows, sys.stdout, indent=1)
+        print()
+        return 0
+    width = max(len(r["uid"]) for r in rows)
+    for r in sorted(rows, key=lambda r: r["uid"]):
+        until = parse_ts(r["until"])
+        when = until.astimezone().strftime("%a %d %b %H:%M") if until else "further notice"
+        scope = "any state" if r["state_key"] == "*" else r["state_key"]
+        live = "" if (until is None or now < until) else "  (expired)"
+        print(f"{r['disposition']:<9} {r['uid']:<{width}}  {scope:<18} until {when}{live}")
     return 0
 
 
@@ -288,9 +306,17 @@ def cmd_open(args) -> int:
 
 def cmd_actions(args) -> int:
     cfg = config_mod.load()
-    for name, spec in sorted(cfg.monitors.items()):
-        for action in spec.actions.values():
-            print(f"{name}.{action.id:<16} {action.agent:<7} {action.label}")
+    rows = [
+        (f"{name}.{action.id}", action.agent, action.kind, action.label)
+        for name, spec in sorted(cfg.monitors.items())
+        for action in spec.actions.values()
+    ]
+    if not rows:
+        print("no actions configured")
+        return 0
+    width = max(len(r[0]) for r in rows)
+    for ref, agent, kind, label in rows:
+        print(f"{ref:<{width}}  {agent:<7} {kind:<9} {label}")
     return 0
 
 
@@ -384,7 +410,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("unmute", cmd_unmute, "clear every suppression on an item")
     s.add_argument("item")
 
-    add("suppressions", cmd_suppressions, "list acks, snoozes and mutes")
+    s = add("suppressions", cmd_suppressions, "list acks, snoozes and mutes")
+    s.add_argument("--json", action="store_true")
 
     s = add("mode", cmd_mode, "switch a monitor between report, investigate and auto")
     s.add_argument("monitor", nargs="?")

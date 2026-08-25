@@ -28,6 +28,7 @@ class Snapshot:
     generated_at: datetime
     items: list[Item] = field(default_factory=list)
     monitors: list[dict[str, Any]] = field(default_factory=list)
+    suppressions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def count(self) -> int:
@@ -40,9 +41,17 @@ class Snapshot:
             "generated_at": self.generated_at.isoformat(),
             "count": self.count,
             "monitors": self.monitors,
+            "suppressions": self.suppressions,
             "items": [i.to_json() for i in self.items],
         }
 
+
+def _suppressions_payload(store: Store) -> list[dict[str, Any]]:
+    return [
+        {"uid": s.uid, "state_key": s.state_key, "disposition": s.disposition,
+         "until": s.until.isoformat() if s.until else None, "note": s.note}
+        for s in store.suppressions()
+    ]
 
 def _env_for(spec: MonitorSpec, cfg: Config) -> dict[str, str]:
     """Options reach a monitor as `XA_OPT_*`, so it can be tuned without editing."""
@@ -165,6 +174,7 @@ def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) 
             }
             for r in reports
         ],
+        suppressions=_suppressions_payload(store),
     )
 
 
@@ -242,6 +252,7 @@ def collect(
             }
             for r in collected
         ],
+        suppressions=_suppressions_payload(store),
     )
 
 
