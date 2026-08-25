@@ -56,6 +56,10 @@ class Action:
     prompt: str | None = None          # path to a template, relative to policy dir
     agent: str = "claude"              # claude | codex; --codex overrides per call
     cwd: str | None = None             # directory to run `wt` from
+    # Where to clone if `cwd` is missing. The daemon runs on one host but
+    # escalation happens wherever the user is sitting, so an action that
+    # assumes a checkout exists is an action that works on one machine.
+    repo: str | None = None
     target: str | None = None          # PR number, branch, or URL, templated
     name: str | None = None            # wt --name, so parallel sessions do not collide
     # `escalate` opens an interactive session; `run` executes a command directly.
@@ -70,6 +74,7 @@ class Action:
             prompt=raw.get("prompt"),
             agent=str(raw.get("agent", "claude")),
             cwd=raw.get("cwd"),
+            repo=raw.get("repo"),
             target=raw.get("target"),
             name=raw.get("name"),
             kind=str(raw.get("kind", "escalate")),

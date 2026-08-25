@@ -230,6 +230,45 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def cmd_open(args) -> int:
+    """Escalate an item into a working session, seeded with what we already know."""
+    from .actions import ActionError, execute, plan, resolve
+
+    snapshot = _load_snapshot()
+    item = _find(snapshot, args.item)
+    cfg = config_mod.load()
+    agent = "codex" if args.codex else ("claude" if args.claude else None)
+
+    try:
+        action = resolve(item, cfg, args.action)
+        inspecting = args.dry_run or args.show_prompt
+        launch = plan(item, action, cfg, agent, ensure=not inspecting)
+    except ActionError as exc:
+        raise SystemExit(f"xa: {exc}")
+
+    if args.show_prompt:
+        print(launch.prompt)
+        return 0
+    if args.dry_run:
+        print(launch.describe())
+        print()
+        print(launch.prompt)
+        return 0
+
+    _store().log_action(item["uid"], action.id, agent or action.agent, "manual",
+                        detail=" ".join(launch.command))
+    print(f"{action.label} → {agent or action.agent} in {launch.cwd}")
+    return execute(launch)
+
+
+def cmd_actions(args) -> int:
+    cfg = config_mod.load()
+    for name, spec in sorted(cfg.monitors.items()):
+        for action in spec.actions.values():
+            print(f"{name}.{action.id:<16} {action.agent:<7} {action.label}")
+    return 0
+
+
 def cmd_config(args) -> int:
     cfg = config_mod.load()
     target = cfg.root / "config.toml"
@@ -328,6 +367,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("monitors", nargs="*")
     s.add_argument("--force", action="store_true", help="ignore each monitor's interval")
     s.add_argument("--quiet", action="store_true")
+
+    s = add("open", cmd_open, "escalate an item into an agent session")
+    s.add_argument("item")
+    s.add_argument("action", nargs="?", help="which action, if the item offers several")
+    s.add_argument("--codex", action="store_true", help="use Codex instead of the configured agent")
+    s.add_argument("--claude", action="store_true", help="use Claude instead of the configured agent")
+    s.add_argument("--dry-run", action="store_true", help="print the command and prompt, launch nothing")
+    s.add_argument("--show-prompt", action="store_true", help="print just the rendered prompt")
+
+    add("actions", cmd_actions, "list the actions each monitor offers")
 
     s = add("config", cmd_config, "open the policy files")
     s.add_argument("what", nargs="?", default="config", choices=["config", "suppressions"])
