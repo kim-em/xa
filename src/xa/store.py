@@ -91,6 +91,18 @@ CREATE TABLE IF NOT EXISTS latest_reports (
     fingerprint  TEXT NOT NULL DEFAULT ''
 );
 
+-- An investigation's output, keyed by the state it was about. When the problem
+-- changes, its state_key changes and the stale plan stops being attached, which
+-- is the same rule acknowledgements follow.
+CREATE TABLE IF NOT EXISTS plans (
+    uid        TEXT NOT NULL,
+    state_key  TEXT NOT NULL,
+    plan       TEXT NOT NULL,
+    ok         INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (uid, state_key)
+);
+
 CREATE TABLE IF NOT EXISTS actions_log (
     ts       TEXT NOT NULL,
     uid      TEXT NOT NULL,
@@ -345,6 +357,29 @@ class Store:
         cur = self.db.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
         self.db.execute("DELETE FROM runs WHERE collected_at < ?", (cutoff,))
         return cur.rowcount
+
+    # -- investigation plans ----------------------------------------------
+
+    @synchronised
+    def save_plan(self, uid: str, state_key: str, plan: str, ok: bool = True) -> None:
+        self.db.execute(
+            "INSERT INTO plans (uid, state_key, plan, ok, created_at) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(uid, state_key) DO UPDATE SET"
+            " plan=excluded.plan, ok=excluded.ok, created_at=excluded.created_at",
+            (uid, state_key, plan, int(ok), utcnow().isoformat()),
+        )
+
+    @synchronised
+    def plan(self, uid: str, state_key: str) -> str | None:
+        row = self.db.execute(
+            "SELECT plan FROM plans WHERE uid = ? AND state_key = ?", (uid, state_key)
+        ).fetchone()
+        return row["plan"] if row else None
+
+    @synchronised
+    def forget_plans(self, keep: timedelta = timedelta(days=30)) -> int:
+        cutoff = (utcnow() - keep).isoformat()
+        return self.db.execute("DELETE FROM plans WHERE created_at < ?", (cutoff,)).rowcount
 
     # -- action log -------------------------------------------------------
 

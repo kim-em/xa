@@ -22,7 +22,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import config as config_mod
-from .collect import collect, due, run_monitor, write_snapshot
+from .collect import collect, due, investigate_pending, run_monitor, write_snapshot
 from .model import utcnow
 from .store import Store
 
@@ -43,6 +43,14 @@ async def collector(cfg: Config, store: Store, snapshot_path: Path, once: bool =
             )
             write_snapshot(snapshot, snapshot_path)
             log.info("snapshot: %d item(s), %d fault(s)", len(snapshot.items), snapshot.count)
+
+            # After publishing, so an investigation never delays the picture.
+            investigated = await loop.run_in_executor(
+                None, lambda: investigate_pending(cfg, store, snapshot)
+            )
+            if investigated:
+                write_snapshot(snapshot, snapshot_path)
+                log.info("attached %d investigation plan(s)", investigated)
         except Exception:
             # The collector must outlive any single failure. A monitor that
             # crashes is already reported as `unknown`; the loop dying would

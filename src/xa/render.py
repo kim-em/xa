@@ -57,6 +57,13 @@ def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
     lines = [head]
 
     trailer = []
+    if item.get("plan"):
+        from .investigate import verdict
+
+        v = verdict(item["plan"])
+        if v.get("fixable"):
+            mark = {"yes": "32", "needs-a-decision": "33"}.get(v["fixable"], "90")
+            trailer.append(paint(f"[investigated: {v['fixable']}]", mark))
     if item.get("detail"):
         trailer.append(item["detail"])
     if item.get("actions"):
@@ -201,7 +208,14 @@ def _render_detail(item: dict[str, Any]) -> str:
     if item.get("actions"):
         out += ["", paint("  actions", "1"), "    " + " ".join(item["actions"])]
     if item.get("plan"):
-        out += ["", paint("  plan", "1"), *("    " + ln for ln in item["plan"].splitlines())]
+        from .investigate import verdict
+
+        v = verdict(item["plan"])
+        heading = "  investigation"
+        if v.get("confidence"):
+            heading += f"  ({v['confidence']} confidence)"
+        out += ["", paint(heading, "1"),
+                *("    " + ln for ln in item["plan"].splitlines())]
     members = (item.get("evidence") or {}).get("cluster_members")
     if members:
         out += ["", paint(f"  clustered with {len(members)} other(s)", "1")]

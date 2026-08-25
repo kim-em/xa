@@ -249,6 +249,13 @@ def collect(
     items.sort(key=lambda i: sort_key(i, now))
     store.record_items(items, now)
 
+    # Attach any plan already produced for each item's current state. Doing this
+    # unconditionally means a plan produced before a monitor was demoted back to
+    # `report` still shows, rather than silently disappearing.
+    from .investigate import attach
+
+    attach(items, store)
+
     return Snapshot(
         generated_at=now,
         items=items,
@@ -264,6 +271,29 @@ def collect(
         ],
         suppressions=_suppressions_payload(store),
     )
+
+
+def investigate_pending(cfg: Config, store: Store, snapshot: Snapshot,
+                        timeout: timedelta = timedelta(minutes=10)) -> int:
+    """Run investigations for items whose monitor is on that rung.
+
+    Deliberately after the snapshot is written, and one at a time: an
+    investigation takes minutes, and holding the whole picture back while one
+    runs would make a rung meant to save time cost it instead.
+    """
+    from .investigate import run as run_one, wanted
+
+    done = 0
+    for item in snapshot.items:
+        if not wanted(item, store):
+            continue
+        result = run_one(item.to_json(), cfg, timeout)
+        if result is None:
+            continue
+        store.save_plan(result.uid, result.state_key, result.plan, result.ok)
+        item.plan = result.plan
+        done += 1
+    return done
 
 
 def write_snapshot(snapshot: Snapshot, path: Path) -> None:

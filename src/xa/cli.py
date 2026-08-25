@@ -304,6 +304,28 @@ def cmd_open(args) -> int:
     return execute(launch)
 
 
+def cmd_investigate(args) -> int:
+    """Investigate one item now, rather than waiting for a collection."""
+    from datetime import timedelta
+
+    from .investigate import run as run_one
+
+    snapshot = _load_snapshot()
+    item = _find(snapshot, args.item)
+    cfg = config_mod.load()
+
+    print(f"investigating {item['uid']} ... (this runs an agent, so it is not instant)")
+    result = run_one(item, cfg, timedelta(minutes=args.timeout))
+    if result is None:
+        raise SystemExit(f"xa: {item['uid']} offers nothing to investigate")
+
+    _store().save_plan(result.uid, result.state_key, result.plan, result.ok)
+    _store().log_action(item["uid"], "investigate", "claude", "manual")
+    print()
+    print(result.plan)
+    return 0
+
+
 def cmd_actions(args) -> int:
     cfg = config_mod.load()
     rows = [
@@ -466,6 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--claude", action="store_true", help="use Claude instead of the configured agent")
     s.add_argument("--dry-run", action="store_true", help="print the command and prompt, launch nothing")
     s.add_argument("--show-prompt", action="store_true", help="print just the rendered prompt")
+
+    s = add("investigate", cmd_investigate,
+            "have an agent work out what is wrong, without fixing it")
+    s.add_argument("item")
+    s.add_argument("--timeout", type=int, default=10, help="minutes")
 
     add("actions", cmd_actions, "list the actions each monitor offers")
 
