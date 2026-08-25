@@ -193,7 +193,12 @@ def run_github_search(spec: MonitorSpec, cfg: Config) -> MonitorReport:
     by_repo: dict[str, int] = {}
     for p in prs:
         by_repo[p["repository"]["nameWithOwner"]] = by_repo.get(p["repository"]["nameWithOwner"], 0) + 1
-    evidence["by_repo"] = dict(sorted(by_repo.items(), key=lambda kv: -kv[1])[:15])
+    # A list, not a mapping: prompt templates iterate, and a bare dict renders
+    # as nothing at all in a section.
+    evidence["by_repo"] = [
+        {"repo": k, "count": v}
+        for k, v in sorted(by_repo.items(), key=lambda kv: -kv[1])[:15]
+    ]
 
     report.observations.append(
         Observation(

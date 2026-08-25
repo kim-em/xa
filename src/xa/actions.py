@@ -73,7 +73,11 @@ class Launch:
     prompt: str
 
     def describe(self) -> str:
-        return f"cd {self.cwd} && WT_CLAUDE_PROMPT=<prompt> {' '.join(shlex.quote(c) for c in self.command)}"
+        """What would actually run, accurately: a dry run that misreports the
+        command is worse than no dry run."""
+        env = " ".join(f"{k}=<{k.split('_')[-1].lower()}>" for k in self.env)
+        command = " ".join(shlex.quote(c) for c in self.command)
+        return f"cd {self.cwd} && " + (f"{env} {command}" if env else command)
 
 
 def plan(item: dict[str, Any], action: Action, cfg: Config, agent: str | None = None,
