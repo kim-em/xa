@@ -106,7 +106,9 @@ scripts/install.sh client    # everywhere else
 ```
 
 The daemon runs monitors on their schedules, writes `snapshot.json`, and serves
-it over HTTP. `xa-sync` pulls that snapshot to `~/.cache/xa` every thirty
+it over HTTP. There is no authentication on the write endpoint, so bind it to a
+private address (a tailscale one, or `127.0.0.1`) and let the network be the
+access control. Anyone who can reach the port can silence an alert. `xa-sync` pulls that snapshot to `~/.cache/xa` every thirty
 seconds, so `xa` reads a local file and never touches the network. A test
 asserts the read path opens no socket.
 

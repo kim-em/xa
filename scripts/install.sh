@@ -34,8 +34,10 @@ MSG
 fi
 
 echo "==> symlink"
-mkdir -p "$HOME/bin"
-ln -sf "$ROOT/.venv/bin/xa" "$HOME/bin/xa"
+# ~/.local/bin rather than ~/bin: the latter is a git repository of scripts, and
+# a generated symlink does not belong in it.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$ROOT/.venv/bin/xa" "$HOME/.local/bin/xa"
 
 echo "==> launchd ($ROLE)"
 mkdir -p "$HOME/Library/LaunchAgents"

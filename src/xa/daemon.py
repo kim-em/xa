@@ -65,7 +65,9 @@ async def run(cfg, store, snapshot_path: Path, host: str, port: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="xa-daemon", description="collect for xa")
     p.add_argument("--host", default="127.0.0.1",
-                   help="bind address; use a tailscale address to serve other machines")
+                   help="bind address. There is no authentication on /act, so bind to a "
+                        "tailscale address rather than 0.0.0.0 and let the tailnet be the "
+                        "access control")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument("--once", action="store_true", help="collect once and exit")
     p.add_argument("--verbose", action="store_true")
