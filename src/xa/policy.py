@@ -316,6 +316,7 @@ def build_items(
                         state_key="crashed",
                         detail=(report.error or "").strip()[:500],
                         since=report.collected_at,
+                        actions=["fix-monitor"],
                     ),
                     severity="unknown",
                     mode=policy.mode,

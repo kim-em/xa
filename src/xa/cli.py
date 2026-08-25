@@ -374,6 +374,32 @@ def cmd_doctor(args) -> int:
         print("\nmissing monitor executables:")
         for m in missing:
             print(f"  {m}")
+
+    # An item nobody can act on is a notification, not an alert, and a surface
+    # full of them is one you stop reading. Faults and pending decisions must
+    # always offer something; backlogs are metrics and may not.
+    snapshot = _load_snapshot()
+    unactionable = [
+        i for i in snapshot.get("items", [])
+        if i["kind"] in ("fault", "pending") and not i.get("actions")
+    ]
+    if unactionable:
+        print(f"\n{len(unactionable)} item(s) with no action (each is a dead end):")
+        for i in unactionable:
+            print(f"  [{i['kind']:7}] {i['uid']}")
+    else:
+        print("\nevery reported fault and pending decision offers an action")
+
+    dangling = []
+    for i in snapshot.get("items", []):
+        spec = cfg.monitors.get(i["monitor"])
+        for a in i.get("actions") or []:
+            if spec is not None and a not in spec.actions and a != "fix-monitor":
+                dangling.append((i["uid"], a))
+    if dangling:
+        print("\nitems offering actions that are not configured:")
+        for uid, a in dangling:
+            print(f"  {uid} -> {a}")
     return 0
 
 

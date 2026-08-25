@@ -45,6 +45,8 @@ def context_for(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_prompt(item: dict[str, Any], action: Action, cfg: Config) -> str:
+    if action.id == "fix-monitor":
+        return render(BROKEN_MONITOR_PROMPT, context_for(item))
     path = cfg.resolve(action.prompt)
     if path is None:
         # Without a template, still hand over the essentials rather than nothing.
@@ -160,8 +162,45 @@ def execute(launch: Launch) -> int:
     return proc.returncode
 
 
+BROKEN_MONITOR_PROMPT = """The `{{monitor}}` monitor could not run.
+
+{{detail}}
+
+It has been failing since {{since_human}} ({{age}}).
+
+Its definition is in this directory: the executable under `monitors/`, and its
+entry in `config.toml`. Read the error, reproduce it by running the monitor
+directly, and fix it.
+
+To run one by hand you need the engine on the path, because the collector
+normally supplies it:
+
+    PYTHONPATH=<xa engine>/src XA_MONITOR={{monitor}} ./monitors/{{monitor}}
+
+It should print one JSON document. A monitor must never report health when it
+cannot see: if the underlying service is genuinely unavailable, the right
+outcome is still a loud non-zero exit, not an empty report.
+"""
+
+
+def broken_monitor_action(cfg: Config) -> Action:
+    """The built-in action for the engine's own 'this monitor crashed' item.
+
+    Every fault should be answerable, including the ones about the tool itself.
+    """
+    return Action(
+        id="fix-monitor",
+        label="Fix the monitor",
+        kind="session",
+        cwd=str(cfg.root),
+        prompt=None,
+    )
+
+
 def resolve(item: dict[str, Any], cfg: Config, action_id: str | None) -> Action:
     """Pick the action to run, defaulting to the item's only one."""
+    if item.get("key") == "_monitor":
+        return broken_monitor_action(cfg)
     spec = cfg.monitors.get(item["monitor"])
     if spec is None:
         raise ActionError(f"no configuration for monitor {item['monitor']!r}")
