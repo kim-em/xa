@@ -83,6 +83,17 @@ def plan(item: dict[str, Any], action: Action, cfg: Config, agent: str | None = 
     if agent not in ("claude", "codex"):
         raise ActionError(f"unknown agent {agent!r}; expected claude or codex")
 
+    if action.kind == "session":
+        # No worktree, no window: start the agent right here, in `cwd`. This is
+        # the right shape for work that spans many repositories, where there is
+        # no single branch to check out.
+        cwd = Path(_expand(action.cwd, item) or ".").expanduser()
+        if not cwd.is_dir():
+            raise ActionError(f"action {action.id!r} wants to run in {cwd}, which does not exist")
+        binary = "codex" if agent == "codex" else "claude"
+        flag = "--dangerously-skip-permissions" if binary == "claude" else "--dangerously-bypass-approvals-and-sandbox"
+        return Launch([binary, flag, prompt], cwd, {}, prompt)
+
     if action.kind == "run":
         if not action.command:
             raise ActionError(f"action {action.id!r} is kind=run but has no command")

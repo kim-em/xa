@@ -61,7 +61,16 @@ def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
 
 
 def _metrics_line(metrics: dict[str, Any]) -> str:
-    parts = [f"{v} {k.replace('_', ' ')}" for k, v in metrics.items()]
+    parts = []
+    for k, v in metrics.items():
+        label = k.replace("_", " ")
+        if isinstance(v, bool):
+            # A flag reads as a caveat, not as a quantity: "3000 · True capped"
+            # is noise, "3000+ (capped)" is information.
+            if v:
+                parts.append(f"({label})")
+        else:
+            parts.append(f"{v} {label}")
     return dim(" · ".join(parts))
 
 
@@ -76,7 +85,16 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     age = humanise((now - generated).total_seconds()) if generated else "?"
 
     out: list[str] = []
-    headline = f"{count} fault{'s' if count != 1 else ''}" if count else "nothing on fire"
+    # Faults exist below the threshold too. Saying "nothing on fire" while
+    # showing a list of faults reads as a contradiction, so name them: they are
+    # real, they are just too young to be worth interrupting for yet.
+    young = sum(1 for i in items if i["kind"] == "fault" and not i.get("counts"))
+    if count:
+        headline = f"{count} fault{'s' if count != 1 else ''}"
+    elif young:
+        headline = f"nothing urgent, {young} below threshold"
+    else:
+        headline = "nothing on fire"
     stale = generated is not None and (now - generated).total_seconds() > 600
     age_text = f"snapshot {age} ago"
     out.append(f"{paint('xa', '1')}  {dim('·')}  {headline}  {dim('·')}  "
@@ -112,7 +130,7 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     healthy = [
         m["name"]
         for m in snapshot.get("monitors", [])
-        if m.get("ok") and not any(x["monitor"] == m["name"] and x["kind"] == "fault" for x in all_items)
+        if m.get("ok") and not any(x["monitor"] == m["name"] and x["kind"] != "backlog" for x in all_items)
     ]
     if healthy:
         out.append("")

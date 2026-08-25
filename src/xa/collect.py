@@ -167,6 +167,16 @@ def collect(
 
     policies = effective_policies(cfg, store)
     store.prune_suppressions(now)
+
+    # Fill in `since` for observations whose monitor could not supply one, using
+    # when we first saw this exact state. Ageing, thresholds and snooze lapse
+    # all depend on it, so an item without a start time is a second-class item.
+    for report in collected:
+        for obs in report.observations:
+            first = store.note_first_seen(report.monitor, obs.key, obs.state_key, report.collected_at)
+            if obs.since is None:
+                obs.since = first
+
     items = build_items(collected, policies, store.suppressions(), now=now)
     items.sort(key=lambda i: sort_key(i, now))
     store.record_items(items, now)

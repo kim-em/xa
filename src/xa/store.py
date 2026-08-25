@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_lookup ON history (monitor, key, ts);
 
+-- When a given (monitor, key, state_key) was first observed. Monitors often
+-- cannot know when a condition began: a disk fills gradually, a host stops
+-- answering at no particular moment. Rather than have each invent a timestamp
+-- or report none, the engine remembers when it first saw the situation.
+CREATE TABLE IF NOT EXISTS first_seen (
+    monitor    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    state_key  TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (monitor, key, state_key)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     monitor      TEXT NOT NULL,
     collected_at TEXT NOT NULL,
@@ -162,6 +174,24 @@ class Store:
         for r in self.db.execute("SELECT * FROM overrides"):
             out.setdefault(r["monitor"], {})[r["name"]] = json.loads(r["value"])
         return out
+
+    # -- first seen -------------------------------------------------------
+
+    def note_first_seen(self, monitor: str, key: str, state_key: str, now: datetime) -> datetime:
+        """Record and return when this exact situation was first observed."""
+        self.db.execute(
+            "INSERT OR IGNORE INTO first_seen (monitor, key, state_key, first_seen) VALUES (?,?,?,?)",
+            (monitor, key, state_key, now.isoformat()),
+        )
+        row = self.db.execute(
+            "SELECT first_seen FROM first_seen WHERE monitor=? AND key=? AND state_key=?",
+            (monitor, key, state_key),
+        ).fetchone()
+        return parse_ts(row["first_seen"]) or now
+
+    def forget_first_seen(self, keep: timedelta = timedelta(days=180)) -> int:
+        cutoff = (utcnow() - keep).isoformat()
+        return self.db.execute("DELETE FROM first_seen WHERE first_seen < ?", (cutoff,)).rowcount
 
     # -- history ----------------------------------------------------------
 
