@@ -177,13 +177,39 @@ def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None
     return (now - last) >= (spec.interval if ok else min(spec.interval, RETRY_AFTER))
 
 
-def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) -> Snapshot:
-    """Build the current picture from whatever each monitor last reported."""
-    now = now or utcnow()
-    reports = [MonitorReport.from_json(raw) for raw in store.latest_reports(known=set(cfg.monitors))]
+def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
+                   now: datetime) -> Snapshot:
+    """Turn monitor reports into the picture the user reads.
+
+    Every snapshot is built here, including the ones published part-way through
+    a sweep. There used to be two of these and they drifted: the progress
+    builder skipped both the `since` backfill and the plan attachment, so a
+    sweep withdrew every investigation it had already paid for and, because an
+    observation with no start time cannot be aged and so reports `warn`,
+    invented faults that the final snapshot then retracted. A snapshot that is
+    published is a snapshot that is read; there is no such thing as a draft.
+    """
+    from .investigate import attach
+
     policies = effective_policies(cfg, store)
+
+    # Fill in `since` for observations whose monitor could not supply one, using
+    # when we first saw this exact state. Ageing, thresholds and snooze lapse
+    # all depend on it, so an item without a start time is a second-class item.
+    for report in reports:
+        for obs in report.observations:
+            first = store.note_first_seen(report.monitor, obs.key, obs.state_key, report.collected_at)
+            if obs.since is None:
+                obs.since = first
+
     items = build_items(reports, policies, store.suppressions(), now=now)
     items.sort(key=lambda i: sort_key(i, now))
+
+    # Attach any plan already produced for each item's current state. Doing this
+    # unconditionally means a plan produced before a monitor was demoted back to
+    # `report` still shows, rather than silently disappearing.
+    attach(items, store)
+
     return Snapshot(
         generated_at=now,
         items=items,
@@ -199,6 +225,13 @@ def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) 
         ],
         suppressions=_suppressions_payload(store),
     )
+
+
+def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) -> Snapshot:
+    """Build the current picture from whatever each monitor last reported."""
+    now = now or utcnow()
+    reports = [MonitorReport.from_json(raw) for raw in store.latest_reports(known=set(cfg.monitors))]
+    return build_snapshot(reports, cfg, store, now)
 
 
 def collect(
@@ -246,44 +279,18 @@ def collect(
             if raw["monitor"] not in fresh:
                 collected.append(MonitorReport.from_json(raw))
 
-    policies = effective_policies(cfg, store)
+    # Everything that ages out. These are cheap deletes on a small database,
+    # and the alternative is a table nobody ever prunes: `forget_plans` existed
+    # for months with no caller, which meant a state that changed and later
+    # came back silently reattached an arbitrarily old investigation.
     store.prune_suppressions(now)
+    store.forget_plans()
+    store.forget_first_seen()
+    store.prune_history()
 
-    # Fill in `since` for observations whose monitor could not supply one, using
-    # when we first saw this exact state. Ageing, thresholds and snooze lapse
-    # all depend on it, so an item without a start time is a second-class item.
-    for report in collected:
-        for obs in report.observations:
-            first = store.note_first_seen(report.monitor, obs.key, obs.state_key, report.collected_at)
-            if obs.since is None:
-                obs.since = first
-
-    items = build_items(collected, policies, store.suppressions(), now=now)
-    items.sort(key=lambda i: sort_key(i, now))
-    store.record_items(items, now)
-
-    # Attach any plan already produced for each item's current state. Doing this
-    # unconditionally means a plan produced before a monitor was demoted back to
-    # `report` still shows, rather than silently disappearing.
-    from .investigate import attach
-
-    attach(items, store)
-
-    return Snapshot(
-        generated_at=now,
-        items=items,
-        monitors=[
-            {
-                "name": r.monitor,
-                "ok": r.ok,
-                "collected_at": r.collected_at.isoformat(),
-                "error": r.error,
-                "mode": (policies.get(r.monitor) or MonitorPolicy(r.monitor)).mode,
-            }
-            for r in collected
-        ],
-        suppressions=_suppressions_payload(store),
-    )
+    snapshot = build_snapshot(collected, cfg, store, now)
+    store.record_items(snapshot.items, now)
+    return snapshot
 
 
 def investigate_pending(cfg: Config, store: Store, snapshot: Snapshot,

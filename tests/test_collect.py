@@ -177,3 +177,62 @@ def test_an_existing_database_survives_a_schema_change(tmp_path):
     st = Store(path)                        # must migrate, not crash
     st.save_report(report(), "abc123")
     assert st.fingerprint("m") == "abc123"
+
+
+# -- a published snapshot is a real snapshot ---------------------------------
+#
+# The daemon publishes after every monitor, so a sweep produces many snapshots
+# and the user reads whichever one happened to land. They must all mean the
+# same thing. Two builders drifted apart once; these are the two ways it showed.
+
+def test_a_snapshot_published_mid_sweep_still_carries_its_plans(tmp_path):
+    """Investigations are paid for once. A sweep must not withdraw them."""
+    from xa.collect import snapshot_from_store
+
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    st.save_report(report(), c.monitors["m"].fingerprint(tmp_path))
+
+    # The observation sets no state key, so it is derived; ask the snapshot what
+    # it came out as rather than guessing at the digest.
+    key = snapshot_from_store(c, st).items[0].obs.state_key
+    st.save_plan("m/k", key, "FINDING: something", ok=True)
+
+    assert snapshot_from_store(c, st).items[0].plan == "FINDING: something"
+
+
+def test_a_snapshot_published_mid_sweep_ages_items_the_same_way(tmp_path):
+    """An observation with no start time reports `warn`, because it cannot be aged.
+
+    The backfill that gives it one used to run only in the final snapshot, so a
+    sweep invented faults that the end of the sweep then retracted -- and the
+    headline count is the one number that has to be true.
+    """
+    from xa.collect import snapshot_from_store
+
+    # A threshold that is not "immediately", so age is allowed to matter.
+    st = store(tmp_path)
+    c = cfg(tmp_path, spec("m", thresholds=Thresholds(warn_after=timedelta(hours=1))))
+    undated = MonitorReport(monitor="m", collected_at=utcnow(),
+                            observations=[Observation(key="k", title="t")])
+    st.save_report(undated, c.monitors["m"].fingerprint(tmp_path))
+
+    item = snapshot_from_store(c, st).items[0]
+    assert item.obs.since is not None, "the backfill has to run wherever a snapshot is built"
+    assert item.severity == "info", "young, not a fault invented by a missing timestamp"
+    assert not item.counts, "and so not in the headline number either"
+
+
+def test_both_builders_agree(tmp_path):
+    """The property the two tests above are really about."""
+    from xa.collect import snapshot_from_store
+
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    st.save_report(MonitorReport(monitor="m", collected_at=utcnow(),
+                                 observations=[Observation(key="k", title="t")]),
+                   c.monitors["m"].fingerprint(tmp_path))
+    st.record_run("m", utcnow(), True, None, 5)
+
+    mid_sweep = snapshot_from_store(c, st)
+    final = collect(c, st)
+    assert [(i.uid, i.severity, i.plan) for i in mid_sweep.items] == \
+           [(i.uid, i.severity, i.plan) for i in final.items]
