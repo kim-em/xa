@@ -28,6 +28,24 @@ reference to `xa-sync`, `daemon_url` or port 8787 anywhere is stale.
   editable, so the files change under a process that already imported the old
   modules.
 
+## The one thing the engine writes into a prompt
+
+An escalation prompt is a policy template, rendered, and nothing else, with a
+single exception: when an investigation is attached to the item, `xa open`
+prepends it, framed as evidence rather than instructions, and the template
+follows. So a template is no longer the whole of what a session is told.
+
+It goes in front deliberately. A plan is agent prose summarising whatever the
+monitor saw, and monitors read other people's pull request titles, chat
+messages and CI logs, so the template gets the last word rather than text
+nobody here wrote. `xa open --show-prompt` shows the result, wrapper included.
+A template that references `{{plan}}` itself is left alone.
+
+The wrapper lives in `actions.plan`, not `build_prompt`, and must stay there:
+`investigate.run` builds its brief from `build_prompt`, so a wrapper any deeper
+would hand a re-investigation its own previous answer and turn an independent
+second look into a confirmation pass.
+
 ## Reading the output honestly
 
 The header age is daemon liveness: when the snapshot was last published, not

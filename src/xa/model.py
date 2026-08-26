@@ -200,6 +200,10 @@ class StoredPlan:
     plan: str
     ok: bool
     created_at: datetime
+    # Whether an agent wrote this. When it did not, the text is a note this
+    # engine wrote in its place ("timed out", "not on PATH"), which is worth
+    # showing a person and worth nothing to a session.
+    from_agent: bool = True
 
 
 @dataclass(slots=True)

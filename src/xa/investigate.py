@@ -69,6 +69,10 @@ class Investigation:
     plan: str
     ok: bool
     agent: str = "claude"
+    # False when `plan` is a note this module wrote because the agent produced
+    # nothing. Such a note explains a gap to a person; it is not analysis, and
+    # it is not worth a session's context.
+    from_agent: bool = True
 
 
 def _agent_command(agent: str, prompt: str) -> list[str]:
@@ -97,8 +101,9 @@ def run(item: dict[str, Any], cfg: Config, timeout: timedelta) -> Investigation 
     # background task that runs every collection.
     env.pop("ANTHROPIC_API_KEY", None)
 
-    def done(text: str, ok: bool) -> Investigation:
-        return Investigation(item["uid"], item["state_key"], text, ok=ok, agent=action.agent)
+    def done(text: str, ok: bool, from_agent: bool = True) -> Investigation:
+        return Investigation(item["uid"], item["state_key"], text, ok=ok,
+                             agent=action.agent, from_agent=from_agent)
 
     try:
         proc = subprocess.run(
@@ -107,9 +112,9 @@ def run(item: dict[str, Any], cfg: Config, timeout: timedelta) -> Investigation 
             timeout=timeout.total_seconds(),
         )
     except subprocess.TimeoutExpired:
-        return done(f"(investigation timed out after {timeout})", ok=False)
+        return done(f"(investigation timed out after {timeout})", ok=False, from_agent=False)
     except FileNotFoundError:
-        return done(f"({action.agent} not found on PATH)", ok=False)
+        return done(f"({action.agent} not found on PATH)", ok=False, from_agent=False)
 
     out = (proc.stdout or "").strip()
     if len(out) > MAX_OUTPUT:
@@ -121,7 +126,8 @@ def run(item: dict[str, Any], cfg: Config, timeout: timedelta) -> Investigation 
         # rung for good and rendered no marker, so it read as never investigated
         # and was never investigated again.
         detail = f": {tail}" if tail else ""
-        return done(f"(investigation produced no output, exit {proc.returncode}{detail})", ok=False)
+        return done(f"(investigation produced no output, exit {proc.returncode}{detail})",
+                    ok=False, from_agent=False)
     if proc.returncode != 0:
         # There is text, but the agent did not finish. Keep what it said, and
         # let it be tried again rather than presenting half an answer as a

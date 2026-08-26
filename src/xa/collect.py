@@ -313,7 +313,8 @@ def investigate_pending(cfg: Config, store: Store, snapshot: Snapshot,
         result = run_one(item.to_json(), cfg, timeout)
         if result is None:
             continue
-        store.save_plan(result.uid, result.state_key, result.plan, result.ok)
+        store.save_plan(result.uid, result.state_key, result.plan, result.ok,
+                        from_agent=result.from_agent)
         item.plan, item.plan_ok = result.plan, result.ok
         # Only successes count. A caller that logs "attached 3 plan(s)" after
         # three timeouts is reporting work it did not do.

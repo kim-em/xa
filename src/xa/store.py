@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS plans (
     state_key  TEXT NOT NULL,
     plan       TEXT NOT NULL,
     ok         INTEGER NOT NULL DEFAULT 1,
+    -- 0 when the text is an engine note rather than an agent's report.
+    from_agent INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     PRIMARY KEY (uid, state_key)
 );
@@ -117,6 +119,7 @@ CREATE TABLE IF NOT EXISTS actions_log (
 # Columns added after the initial schema, applied to existing databases.
 ADDED_COLUMNS = [
     ("latest_reports", "fingerprint", "TEXT NOT NULL DEFAULT ''"),
+    ("plans", "from_agent", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 
@@ -366,23 +369,29 @@ class Store:
     # -- investigation plans ----------------------------------------------
 
     @synchronised
-    def save_plan(self, uid: str, state_key: str, plan: str, ok: bool = True) -> None:
+    def save_plan(self, uid: str, state_key: str, plan: str, ok: bool = True,
+                  from_agent: bool = True) -> None:
         self.db.execute(
-            "INSERT INTO plans (uid, state_key, plan, ok, created_at) VALUES (?,?,?,?,?)"
+            "INSERT INTO plans (uid, state_key, plan, ok, from_agent, created_at)"
+            " VALUES (?,?,?,?,?,?)"
             " ON CONFLICT(uid, state_key) DO UPDATE SET"
-            " plan=excluded.plan, ok=excluded.ok, created_at=excluded.created_at",
-            (uid, state_key, plan, int(ok), utcnow().isoformat()),
+            " plan=excluded.plan, ok=excluded.ok, from_agent=excluded.from_agent,"
+            " created_at=excluded.created_at",
+            (uid, state_key, plan, int(ok), int(from_agent), utcnow().isoformat()),
         )
 
     @synchronised
     def stored_plan(self, uid: str, state_key: str) -> StoredPlan | None:
         row = self.db.execute(
-            "SELECT plan, ok, created_at FROM plans WHERE uid = ? AND state_key = ?",
+            "SELECT plan, ok, from_agent, created_at FROM plans"
+            " WHERE uid = ? AND state_key = ?",
             (uid, state_key),
         ).fetchone()
         if row is None:
             return None
-        return StoredPlan(row["plan"], bool(row["ok"]), parse_ts(row["created_at"]) or utcnow())
+        return StoredPlan(row["plan"], bool(row["ok"]),
+                          parse_ts(row["created_at"]) or utcnow(),
+                          from_agent=bool(row["from_agent"]))
 
     @synchronised
     def forget_plans(self, keep: timedelta = timedelta(days=30)) -> int:

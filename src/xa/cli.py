@@ -248,10 +248,17 @@ def cmd_open(args) -> int:
     cfg = config_mod.load()
     agent = "codex" if args.codex else ("claude" if args.claude else None)
 
+    store = _store()
+    # From the store rather than the snapshot: it is authoritative, it is on
+    # this machine, and an investigation that finished since the last
+    # collection should still reach the session it was produced for.
+    investigation = store.stored_plan(item["uid"], item["state_key"])
+
     try:
         action = resolve(item, cfg, args.action)
         inspecting = args.dry_run or args.show_prompt
-        launch = plan(item, action, cfg, agent, ensure=not inspecting)
+        launch = plan(item, action, cfg, agent, ensure=not inspecting,
+                      investigation=investigation)
     except ActionError as exc:
         raise SystemExit(f"xa: {exc}")
 
@@ -264,8 +271,8 @@ def cmd_open(args) -> int:
         print(launch.prompt)
         return 0
 
-    _store().log_action(item["uid"], action.id, agent or action.agent, "manual",
-                        detail=" ".join(launch.command))
+    store.log_action(item["uid"], action.id, agent or action.agent, "manual",
+                     detail=" ".join(launch.command))
     print(f"{action.label} → {agent or action.agent} in {launch.cwd}")
     return execute(launch)
 
@@ -286,7 +293,8 @@ def cmd_investigate(args) -> int:
         raise SystemExit(f"xa: {item['uid']} offers nothing to investigate")
 
     store = _store()
-    store.save_plan(result.uid, result.state_key, result.plan, result.ok)
+    store.save_plan(result.uid, result.state_key, result.plan, result.ok,
+                    from_agent=result.from_agent)
     store.log_action(item["uid"], "investigate", result.agent, "manual")
 
     # Publish rather than waiting for the collector, exactly as `_mark` does.
