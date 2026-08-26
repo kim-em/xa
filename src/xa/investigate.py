@@ -17,7 +17,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,12 @@ confident one is not. If the problem appears to have resolved itself, say so.
 # and this is read by a person deciding whether to act.
 MAX_OUTPUT = 20000
 
+# How long a failed investigation stands before it is tried again. Not never:
+# a timeout is a fact about one afternoon, not about the problem. Not every
+# tick either, because an agent that cannot run here will fail identically in
+# thirty seconds and bill for the privilege.
+RETRY_FAILED_AFTER = timedelta(hours=6)
+
 
 @dataclass(slots=True)
 class Investigation:
@@ -62,6 +68,7 @@ class Investigation:
     state_key: str
     plan: str
     ok: bool
+    agent: str = "claude"
 
 
 def _agent_command(agent: str, prompt: str) -> list[str]:
@@ -90,6 +97,9 @@ def run(item: dict[str, Any], cfg: Config, timeout: timedelta) -> Investigation 
     # background task that runs every collection.
     env.pop("ANTHROPIC_API_KEY", None)
 
+    def done(text: str, ok: bool) -> Investigation:
+        return Investigation(item["uid"], item["state_key"], text, ok=ok, agent=action.agent)
+
     try:
         proc = subprocess.run(
             _agent_command(action.agent, prompt),
@@ -97,20 +107,27 @@ def run(item: dict[str, Any], cfg: Config, timeout: timedelta) -> Investigation 
             timeout=timeout.total_seconds(),
         )
     except subprocess.TimeoutExpired:
-        return Investigation(item["uid"], item["state_key"],
-                             f"(investigation timed out after {timeout})", ok=False)
+        return done(f"(investigation timed out after {timeout})", ok=False)
     except FileNotFoundError:
-        return Investigation(item["uid"], item["state_key"],
-                             f"({action.agent} not found on PATH)", ok=False)
+        return done(f"({action.agent} not found on PATH)", ok=False)
 
     out = (proc.stdout or "").strip()
     if len(out) > MAX_OUTPUT:
         out = out[:MAX_OUTPUT] + "\n\n[truncated]"
-    if proc.returncode != 0 and not out:
-        tail = (proc.stderr or "").strip().splitlines()[-3:]
-        return Investigation(item["uid"], item["state_key"],
-                             f"(investigation failed: {' / '.join(tail)[:300]})", ok=False)
-    return Investigation(item["uid"], item["state_key"], out, ok=True)
+    tail = " / ".join((proc.stderr or "").strip().splitlines()[-3:])[:300]
+
+    if not out:
+        # Silence is not a finding. Storing it as one retired the item from the
+        # rung for good and rendered no marker, so it read as never investigated
+        # and was never investigated again.
+        detail = f": {tail}" if tail else ""
+        return done(f"(investigation produced no output, exit {proc.returncode}{detail})", ok=False)
+    if proc.returncode != 0:
+        # There is text, but the agent did not finish. Keep what it said, and
+        # let it be tried again rather than presenting half an answer as a
+        # whole one.
+        return done(out, ok=False)
+    return done(out, ok=True)
 
 
 VERDICT_KEYS = ("FINDING", "CONFIDENCE", "FIXABLE")
@@ -131,23 +148,32 @@ def verdict(plan: str) -> dict[str, str]:
     return out
 
 
-def wanted(item: Item, store: Store) -> bool:
+def wanted(item: Item, store: Store, now: datetime | None = None) -> bool:
     """Whether this item should be investigated now.
 
     Only active faults and pending decisions, only in `investigate` mode, and
     only once per state: re-investigating an unchanged problem every half hour
     would burn money to reproduce an answer already on the item.
+
+    A run that failed is the exception. It answered nothing, so it must not
+    count as the answer -- but it must not be retried on every tick either.
     """
     if item.mode != "investigate" or item.disposition != "active":
         return False
-    if item.obs.kind == "backlog" or not item.obs.actions:
+    if item.obs.kind not in ("fault", "pending") or not item.obs.actions:
         return False
-    return store.plan(item.uid, item.obs.state_key) is None
+    stored = store.stored_plan(item.uid, item.obs.state_key)
+    if stored is None:
+        return True
+    if stored.ok:
+        return False
+    return ((now or utcnow()) - stored.created_at) >= RETRY_FAILED_AFTER
 
 
 def attach(items: list[Item], store: Store) -> None:
     """Attach any plan already stored for each item's current state."""
     for item in items:
-        plan = store.plan(item.uid, item.obs.state_key)
-        if plan is not None:
-            item.plan = plan
+        stored = store.stored_plan(item.uid, item.obs.state_key)
+        if stored is not None:
+            item.plan = stored.plan
+            item.plan_ok = stored.ok

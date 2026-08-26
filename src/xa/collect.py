@@ -7,6 +7,7 @@ work. Reads never do, which is the whole point: asking must never start work.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -19,6 +20,8 @@ from .config import Config, MonitorSpec
 from .model import Item, MonitorReport, utcnow
 from .policy import MonitorPolicy, Thresholds, build_items, parse_duration, sort_key
 from .store import Store
+
+log = logging.getLogger("xa.collect")
 
 
 @dataclass(slots=True)
@@ -311,8 +314,13 @@ def investigate_pending(cfg: Config, store: Store, snapshot: Snapshot,
         if result is None:
             continue
         store.save_plan(result.uid, result.state_key, result.plan, result.ok)
-        item.plan = result.plan
-        done += 1
+        item.plan, item.plan_ok = result.plan, result.ok
+        # Only successes count. A caller that logs "attached 3 plan(s)" after
+        # three timeouts is reporting work it did not do.
+        if result.ok:
+            done += 1
+        else:
+            log.warning("investigation of %s failed: %s", result.uid, result.plan[:200])
     return done
 
 

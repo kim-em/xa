@@ -61,7 +61,12 @@ def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
         from .investigate import verdict
 
         v = verdict(item["plan"])
-        if v.get("fixable"):
+        if not item.get("plan_ok", True):
+            # Say so on the row. A failed investigation that renders as nothing
+            # is worse than one that renders as a failure: it looks untouched,
+            # so nobody asks why the rung never produced anything.
+            trailer.append(paint("[investigation failed]", "31"))
+        elif v.get("fixable"):
             mark = {"yes": "32", "needs-a-decision": "33"}.get(v["fixable"], "90")
             trailer.append(paint(f"[investigated: {v['fixable']}]", mark))
     if item.get("detail"):
@@ -182,19 +187,20 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     return "\n".join(out)
 
 
-def render_detail(item: dict[str, Any], colour: bool | None = None) -> str:
+def render_detail(item: dict[str, Any], colour: bool | None = None,
+                  actions_taken: Sequence[Any] = ()) -> str:
     """Everything the check already knows, so an escalation need not re-derive it."""
     import json
 
     global _COLOUR
     previous, _COLOUR = _COLOUR, colour
     try:
-        return _render_detail(item)
+        return _render_detail(item, actions_taken)
     finally:
         _COLOUR = previous
 
 
-def _render_detail(item: dict[str, Any]) -> str:
+def _render_detail(item: dict[str, Any], actions_taken: Sequence[Any] = ()) -> str:
     import json
 
     now = utcnow()
@@ -225,11 +231,26 @@ def _render_detail(item: dict[str, Any]) -> str:
         from .investigate import verdict
 
         v = verdict(item["plan"])
-        heading = "  investigation"
-        if v.get("confidence"):
-            heading += f"  ({v['confidence']} confidence)"
+        if not item.get("plan_ok", True):
+            heading = "  investigation (did not finish; will be tried again)"
+        else:
+            heading = "  investigation"
+            # The prompt asks for one word. When an agent writes a sentence
+            # instead, it belongs in the body -- where it already is -- not
+            # spliced into a heading that then runs off the terminal.
+            if 0 < len(v.get("confidence", "")) <= 12:
+                heading += f"  ({v['confidence']} confidence)"
         out += ["", paint(heading, "1"),
                 *("    " + ln for ln in item["plan"].splitlines())]
+    if actions_taken:
+        # What has already been done about this, from the action log. Worth
+        # knowing before starting anything: an item escalated an hour ago
+        # probably has a session open on it somewhere.
+        out += ["", paint("  already done", "1")]
+        for a in actions_taken:
+            when = parse_ts(a["ts"])
+            ago = humanise((now - when).total_seconds()) if when else "?"
+            out.append(f"    {ago:>4} ago   {a['action']} ({a['mode']}, {a['agent']})")
     members = (item.get("evidence") or {}).get("cluster_members")
     if members:
         out += ["", paint(f"  clustered with {len(members)} other(s)", "1")]

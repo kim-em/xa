@@ -122,7 +122,7 @@ def cmd_why(args) -> int:
         return 0
     from .render import render_detail
 
-    print(render_detail(item))
+    print(render_detail(item, actions_taken=_store().recent_actions(item["uid"])))
     return 0
 
 
@@ -274,7 +274,7 @@ def cmd_investigate(args) -> int:
     """Investigate one item now, rather than waiting for a collection."""
     from datetime import timedelta
 
-    from .investigate import run as run_one
+    from .investigate import RETRY_FAILED_AFTER, run as run_one
 
     snapshot = _load_snapshot()
     item = _find(snapshot, args.item)
@@ -285,10 +285,26 @@ def cmd_investigate(args) -> int:
     if result is None:
         raise SystemExit(f"xa: {item['uid']} offers nothing to investigate")
 
-    _store().save_plan(result.uid, result.state_key, result.plan, result.ok)
-    _store().log_action(item["uid"], "investigate", "claude", "manual")
+    store = _store()
+    store.save_plan(result.uid, result.state_key, result.plan, result.ok)
+    store.log_action(item["uid"], "investigate", result.agent, "manual")
+
+    # Publish rather than waiting for the collector, exactly as `_mark` does.
+    # A report that only appears after the next sweep -- minutes, if a sweep is
+    # running -- reads as though the investigation did not happen.
+    for i in snapshot.get("items", []):
+        if i["uid"] == item["uid"]:
+            i["plan"], i["plan_ok"] = result.plan, result.ok
+    from .collect import write_snapshot_json
+
+    write_snapshot_json(snapshot, snapshot_path())
+
     print()
     print(result.plan)
+    if not result.ok:
+        print()
+        print(f"xa: that investigation did not finish; it will be tried again "
+              f"in {RETRY_FAILED_AFTER}", file=sys.stderr)
     return 0
 
 

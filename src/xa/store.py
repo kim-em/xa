@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from .model import parse_ts, utcnow
+from .model import StoredPlan, parse_ts, utcnow
 from .policy import Suppression
 
 SCHEMA = """
@@ -375,11 +375,14 @@ class Store:
         )
 
     @synchronised
-    def plan(self, uid: str, state_key: str) -> str | None:
+    def stored_plan(self, uid: str, state_key: str) -> StoredPlan | None:
         row = self.db.execute(
-            "SELECT plan FROM plans WHERE uid = ? AND state_key = ?", (uid, state_key)
+            "SELECT plan, ok, created_at FROM plans WHERE uid = ? AND state_key = ?",
+            (uid, state_key),
         ).fetchone()
-        return row["plan"] if row else None
+        if row is None:
+            return None
+        return StoredPlan(row["plan"], bool(row["ok"]), parse_ts(row["created_at"]) or utcnow())
 
     @synchronised
     def forget_plans(self, keep: timedelta = timedelta(days=30)) -> int:
@@ -394,3 +397,16 @@ class Store:
             "INSERT INTO actions_log (ts, uid, action, agent, mode, detail) VALUES (?,?,?,?,?,?)",
             (utcnow().isoformat(), uid, action, agent, mode, detail),
         )
+
+    @synchronised
+    def recent_actions(self, uid: str, limit: int = 5) -> list[sqlite3.Row]:
+        """What has already been done about this item, most recent first.
+
+        Worth showing before starting anything: an item that was escalated an
+        hour ago probably has a session open on it somewhere.
+        """
+        return self.db.execute(
+            "SELECT ts, action, agent, mode FROM actions_log WHERE uid = ?"
+            " ORDER BY ts DESC LIMIT ?",
+            (uid, limit),
+        ).fetchall()

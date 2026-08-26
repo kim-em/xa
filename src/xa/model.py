@@ -187,6 +187,20 @@ class MonitorReport:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class StoredPlan:
+    """An investigation's output as it was recorded.
+
+    The verdict and the time matter as much as the text: without them a failed
+    run is indistinguishable from a finished one, which is how a timeout used
+    to retire an item from the rung for good.
+    """
+
+    plan: str
+    ok: bool
+    created_at: datetime
+
+
 @dataclass(slots=True)
 class Item:
     """An observation with policy applied. This is what the user sees."""
@@ -203,6 +217,10 @@ class Item:
     mode: str = "report"
     # Attached by an investigate run, when that rung is switched on.
     plan: str | None = None
+    # Whether that run finished cleanly. A timed-out or crashed investigation
+    # still has text worth reading, but it is not an answer, and presenting it
+    # as one is how a half-finished report gets acted on.
+    plan_ok: bool = True
 
     @property
     def key(self) -> str:
@@ -238,6 +256,7 @@ class Item:
             "cluster_size": self.cluster_size,
             "mode": self.mode,
             "plan": self.plan,
+            "plan_ok": self.plan_ok,
             "counts": self.counts,
             **self.obs.to_json(),
         }
