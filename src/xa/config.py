@@ -57,9 +57,8 @@ class Action:
     prompt: str | None = None          # path to a template, relative to policy dir
     agent: str = "claude"              # claude | codex; --codex overrides per call
     cwd: str | None = None             # directory to run `wt` from
-    # Where to clone if `cwd` is missing. The daemon runs on one host but
-    # escalation happens wherever the user is sitting, so an action that
-    # assumes a checkout exists is an action that works on one machine.
+    # Where to clone if `cwd` is missing. An action that assumes the checkout
+    # is already there is an action that works on this machine and nowhere else.
     repo: str | None = None
     target: str | None = None          # PR number, branch, or URL, templated
     name: str | None = None            # wt --name, so parallel sessions do not collide
@@ -137,7 +136,6 @@ class Config:
     autonomy_enabled: bool = False
     snooze_hour: int = 9
     ack_expiry: timedelta = timedelta(days=90)
-    daemon_url: str = "http://127.0.0.1:8787"
     raw: dict[str, Any] = field(default_factory=dict)
 
     def monitor(self, name: str) -> MonitorSpec:
@@ -168,7 +166,6 @@ def load(root: Path | None = None) -> Config:
         autonomy_enabled=bool(raw.get("autonomy_enabled", False)),
         snooze_hour=int(raw.get("snooze_hour", 9)),
         ack_expiry=parse_duration(raw.get("ack_expiry")) or timedelta(days=90),
-        daemon_url=str(raw.get("daemon_url", "http://127.0.0.1:8787")),
         raw=raw,
     )
 

@@ -60,8 +60,8 @@ def _env_for(spec: MonitorSpec, cfg: Config) -> dict[str, str]:
     env["XA_MONITOR"] = spec.name
     # Let monitors `import xa` without knowing where the engine is installed.
     # Hardcoding a source path in each monitor makes the policy directory
-    # non-portable, which matters because the collector runs on a different
-    # machine from the one they were written on.
+    # non-portable, and the policy directory is meant to outlive any one
+    # machine's idea of where things live.
     import xa as _xa
 
     engine = str(Path(_xa.__file__).resolve().parent.parent)
@@ -151,17 +151,30 @@ def effective_policies(cfg: Config, store: Store | None) -> dict[str, MonitorPol
     return policies
 
 
+# How long to wait before retrying a monitor that failed. Short, because the
+# usual cause is a network that was not up yet, and the cost of being wrong is
+# one more timeout.
+RETRY_AFTER = timedelta(minutes=5)
+
+
 def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None) -> bool:
     """Whether to run this monitor now.
 
     A monitor whose definition has changed is always due: waiting out an
     interval to see the effect of an edit is friction that stops you fixing a
     noisy check.
+
+    A monitor whose last run *failed* is due again after `RETRY_AFTER` rather
+    than its full interval. The collector runs on a laptop, which wakes with no
+    network for a few seconds every day; without this, one badly-timed failure
+    leaves a six-hourly check reading `unknown` for six hours.
     """
     if root is not None and store.fingerprint(spec.name) != spec.fingerprint(root):
         return True
-    last = store.last_run(spec.name)
-    return last is None or (now - last) >= spec.interval
+    last, ok = store.last_run(spec.name)
+    if last is None:
+        return True
+    return (now - last) >= (spec.interval if ok else min(spec.interval, RETRY_AFTER))
 
 
 def snapshot_from_store(cfg: Config, store: Store, now: datetime | None = None) -> Snapshot:
@@ -296,12 +309,21 @@ def investigate_pending(cfg: Config, store: Store, snapshot: Snapshot,
     return done
 
 
-def write_snapshot(snapshot: Snapshot, path: Path) -> None:
-    """Write atomically, so a reader never sees a half-written file."""
+def write_snapshot_json(payload: dict[str, Any], path: Path) -> None:
+    """Write atomically, so a reader never sees a half-written file.
+
+    The temporary name carries the pid. The daemon and an `xa ack` both publish
+    to this path, and a shared temporary file lets one of them replace the
+    other's underneath it.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(snapshot.to_json(), indent=1))
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=1))
     tmp.replace(path)
+
+
+def write_snapshot(snapshot: Snapshot, path: Path) -> None:
+    write_snapshot_json(snapshot.to_json(), path)
 
 
 def read_snapshot(path: Path) -> dict[str, Any] | None:

@@ -3,27 +3,27 @@
 Runs monitors on their own schedules and rewrites the snapshot. Everything
 expensive happens here so that nothing expensive happens when the user asks.
 
-Monitors run one at a time, in a worker thread so the HTTP server stays
-responsive. Serial execution is not an oversight: fanning out concurrently
-against the same APIs produced TLS handshake failures and invented outages
-during development, and a monitoring tool that falls over under its own load is
-worse than none.
+Monitors run one at a time. Serial execution is not an oversight: fanning out
+concurrently against the same APIs produced TLS handshake failures and invented
+outages during development, and a monitoring tool that falls over under its own
+load is worse than none.
+
+One machine collects and that machine is the one you read on, so this is a
+plain loop over a local sqlite database. There is no server here and nothing to
+ship anywhere.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 
-from aiohttp import web
-
 from . import config as config_mod
-from .collect import collect, due, investigate_pending, run_monitor, write_snapshot
-from .model import utcnow
+from .collect import collect, investigate_pending, write_snapshot
 from .store import Store
 
 log = logging.getLogger("xa.daemon")
@@ -33,21 +33,17 @@ log = logging.getLogger("xa.daemon")
 TICK = timedelta(seconds=30)
 
 
-async def collector(cfg: Config, store: Store, snapshot_path: Path, once: bool = False) -> None:  # type: ignore[name-defined]
-    loop = asyncio.get_running_loop()
+def collector(cfg, store: Store, snapshot_path: Path, once: bool = False) -> None:
     while True:
         try:
-            snapshot = await loop.run_in_executor(
-                None,
-                lambda: collect(cfg, store, on_progress=lambda s: write_snapshot(s, snapshot_path)),
+            snapshot = collect(
+                cfg, store, on_progress=lambda s: write_snapshot(s, snapshot_path)
             )
             write_snapshot(snapshot, snapshot_path)
             log.info("snapshot: %d item(s), %d fault(s)", len(snapshot.items), snapshot.count)
 
             # After publishing, so an investigation never delays the picture.
-            investigated = await loop.run_in_executor(
-                None, lambda: investigate_pending(cfg, store, snapshot)
-            )
+            investigated = investigate_pending(cfg, store, snapshot)
             if investigated:
                 write_snapshot(snapshot, snapshot_path)
                 log.info("attached %d investigation plan(s)", investigated)
@@ -58,28 +54,11 @@ async def collector(cfg: Config, store: Store, snapshot_path: Path, once: bool =
             log.exception("collection failed")
         if once:
             return
-        await asyncio.sleep(TICK.total_seconds())
-
-
-async def run(cfg, store, snapshot_path: Path, host: str, port: int) -> None:
-    from .server import build_app
-
-    app = build_app(cfg, store, snapshot_path)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host, port)
-    await site.start()
-    log.info("serving on http://%s:%d, policy %s", host, port, cfg.root)
-    await collector(cfg, store, snapshot_path)
+        time.sleep(TICK.total_seconds())
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="xa-daemon", description="collect for xa")
-    p.add_argument("--host", default="127.0.0.1",
-                   help="bind address. There is no authentication on /act, so bind to a "
-                        "tailscale address rather than 0.0.0.0 and let the tailnet be the "
-                        "access control")
-    p.add_argument("--port", type=int, default=8787)
     p.add_argument("--once", action="store_true", help="collect once and exit")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -97,12 +76,9 @@ def main(argv: list[str] | None = None) -> int:
         log.error("no monitors configured in %s/config.toml", cfg.root)
         return 1
 
-    if args.once:
-        asyncio.run(collector(cfg, store, snapshot_path(), once=True))
-        return 0
-
+    log.info("collecting for policy %s", cfg.root)
     try:
-        asyncio.run(run(cfg, store, snapshot_path(), args.host, args.port))
+        collector(cfg, store, snapshot_path(), once=args.once)
     except KeyboardInterrupt:
         return 0
     return 0

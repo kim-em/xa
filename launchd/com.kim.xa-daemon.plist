@@ -8,20 +8,15 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/kim/projects/xa/.venv/bin/xa-daemon</string>
-        <!-- Bind to the tailscale address only. There is no authentication on
-             /act, so anyone who can reach the port can silence an alert;
-             tailscale is the access control. Use 127.0.0.1 for a single-machine
-             setup, and edit this address for a different tailnet. -->
-        <string>--host</string>
-        <string>100.122.142.62</string>
-        <string>--port</string>
-        <string>8787</string>
     </array>
 
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- ~/.local/bin because that is where `claude` lives, and a monitor in
+             `investigate` or `auto` mode launches it. A launchd job inherits no
+             login shell, so a missing entry here is stored as the plan. -->
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/kim/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>XA_POLICY</key>
         <string>/Users/kim/metacortex/xa</string>
     </dict>

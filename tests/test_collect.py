@@ -121,6 +121,33 @@ def test_a_changed_monitor_is_due_regardless_of_interval(tmp_path):
     assert due(s, st, utcnow(), tmp_path)          # edited: run it now
 
 
+def test_a_monitor_that_failed_is_retried_long_before_its_interval(tmp_path):
+    """The collector runs on a laptop, which wakes with no network for a moment.
+
+    Scheduling on the last run whatever its verdict meant one badly-timed
+    failure left a six-hourly check reading `unknown` for six hours.
+    """
+    st, s = store(tmp_path), spec("m", interval=timedelta(hours=6))
+    now = utcnow()
+
+    st.record_run("m", now - timedelta(minutes=10), False, "no route to host", 1)
+    assert due(s, st, now)                     # failed ten minutes ago: try again
+
+    st.record_run("m", now - timedelta(minutes=1), False, "no route to host", 1)
+    assert not due(s, st, now)                 # but not on every tick
+
+    st.record_run("m", now - timedelta(minutes=10), True, None, 1)
+    assert not due(s, st, now)                 # succeeded: the interval stands
+
+
+def test_the_retry_never_slows_a_monitor_down(tmp_path):
+    """A monitor whose interval is shorter than the retry keeps its own pace."""
+    st, s = store(tmp_path), spec("m", interval=timedelta(seconds=30))
+    now = utcnow()
+    st.record_run("m", now - timedelta(minutes=1), False, "boom", 1)
+    assert due(s, st, now)
+
+
 def test_changed_options_also_make_a_monitor_due(tmp_path):
     st = store(tmp_path)
     (tmp_path / "monitors").mkdir()

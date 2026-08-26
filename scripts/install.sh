@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POLICY="${XA_POLICY:-$HOME/metacortex/xa}"
-ROLE="${1:-client}"   # `daemon` on the collecting host, `client` everywhere else
 
 cd "$ROOT"
 
@@ -41,19 +40,25 @@ echo "==> symlink"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/.venv/bin/xa" "$HOME/.local/bin/xa"
 
-echo "==> launchd ($ROLE)"
+echo "==> launchd"
 mkdir -p "$HOME/Library/LaunchAgents"
-case "$ROLE" in
-    daemon) plists="com.kim.xa-daemon" ;;
-    client) plists="com.kim.xa-sync" ;;
-    *) echo "usage: install.sh [daemon|client]" >&2; exit 2 ;;
-esac
-for label in $plists; do
-    cp "$ROOT/launchd/$label.plist" "$HOME/Library/LaunchAgents/$label.plist"
-    launchctl unload "$HOME/Library/LaunchAgents/$label.plist" 2>/dev/null || true
-    launchctl load "$HOME/Library/LaunchAgents/$label.plist"
-    echo "    loaded $label"
-done
+
+# xa used to collect on one host and sync a snapshot to the others. It does not
+# any more. Remove the sync agent here rather than by hand: it has KeepAlive, so
+# a half-finished upgrade would leave it overwriting the snapshot this machine
+# is now generating for itself.
+legacy="$HOME/Library/LaunchAgents/com.kim.xa-sync.plist"
+if [ -f "$legacy" ]; then
+    launchctl bootout "gui/$(id -u)/com.kim.xa-sync" 2>/dev/null || true
+    rm -f "$legacy"
+    echo "    removed com.kim.xa-sync"
+fi
+
+label="com.kim.xa-daemon"
+cp "$ROOT/launchd/$label.plist" "$HOME/Library/LaunchAgents/$label.plist"
+launchctl unload "$HOME/Library/LaunchAgents/$label.plist" 2>/dev/null || true
+launchctl load "$HOME/Library/LaunchAgents/$label.plist"
+echo "    loaded $label"
 
 echo
 echo "Done. Try: xa doctor"

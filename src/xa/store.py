@@ -123,10 +123,10 @@ ADDED_COLUMNS = [
 def synchronised(fn):
     """Serialise access to the connection.
 
-    The daemon runs collection in a worker thread while serving HTTP on the
-    event loop, so one connection is genuinely reached from several threads.
-    sqlite3 forbids that by default; WAL plus a lock is the simple, correct
-    alternative to a connection pool for a database this small.
+    Two processes write this database: the daemon on its tick, and `xa` when
+    you acknowledge something. WAL is what makes that safe. The lock is the
+    in-process half of the same guarantee, since sqlite3 forbids sharing one
+    connection across threads and a caller is free to add one.
     """
 
     @functools.wraps(fn)
@@ -330,12 +330,17 @@ class Store:
         )
 
     @synchronised
-    def last_run(self, monitor: str) -> datetime | None:
+    def last_run(self, monitor: str) -> tuple[datetime | None, bool]:
+        """When this monitor last ran, and whether that run succeeded.
+
+        The verdict matters to scheduling: a monitor that failed should be tried
+        again long before its interval is up. See `collect.due`.
+        """
         row = self.db.execute(
-            "SELECT collected_at FROM runs WHERE monitor = ? ORDER BY collected_at DESC LIMIT 1",
+            "SELECT collected_at, ok FROM runs WHERE monitor = ? ORDER BY collected_at DESC LIMIT 1",
             (monitor,),
         ).fetchone()
-        return parse_ts(row["collected_at"]) if row else None
+        return (parse_ts(row["collected_at"]), bool(row["ok"])) if row else (None, True)
 
     @synchronised
     def metric_series(self, monitor: str, key: str, metric: str, since: datetime) -> list[tuple[datetime, float]]:

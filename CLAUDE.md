@@ -1,75 +1,52 @@
 # xa
 
-## The machine you are on is not the machine that collects
+## One machine collects, and it is this one
 
-`carica` runs the daemon. `persica` and every other machine run `xa-sync`,
-which pulls `snapshot.json` over the tailnet every thirty seconds into
-`~/.cache/xa`, and `xa` prints that file. So the rows you are looking at were
-produced on carica, by carica's checkout of this repository and carica's copy
-of the policy directory (`~/metacortex/xa`, per `launchd/com.kim.xa-daemon.plist`).
+The daemon runs here, under `com.kim.xa-daemon`, and writes
+`~/.cache/xa/snapshot.json`, which `xa` reads. The policy — every monitor,
+threshold, prompt and action — lives in `~/metacortex/xa`, a separate git
+repository (`kim-em/metacortex`). Nothing in this repository should contain a
+domain-specific string; if a change seems to need one, it belongs there.
 
-Two consequences, both of which have already cost an afternoon:
+A monitor that needs another host reaches it itself, over ssh:
+`monitors/corpus` runs carica's health check that way. The engine has no idea
+other machines exist, which is the point.
 
-- Editing a monitor here changes nothing anyone can see. Running the monitor
-  directly, or `xa collect <monitor>`, proves the edit works and is then
-  overwritten by the next sync within thirty seconds. That is a test, never a
-  confirmation.
-- `xa doctor` prints the *local* policy directory and calls the snapshot a
-  local file. It says nothing about the collector, so it cannot tell you a fix
-  has landed. Neither can a fresh `snapshot Ns ago`: that timestamp is
-  carica's, and it stays fresh while serving stale beliefs.
+xa used to collect on carica and sync a snapshot here over HTTP. It doesn't. A
+reference to `xa-sync`, `daemon_url` or port 8787 anywhere is stale.
 
-## Changing xa's behaviour means deploying to carica
+## Changing behaviour
 
-When Kim asks for a change in what `xa` reports, the change is not done when it
-is committed. It is done when carica is running it. Do the deploy in the same
-turn, unless she says otherwise.
+- **A monitor executable** takes effect within a tick. `due()` hashes the
+  file's bytes every 30 seconds, so an edited monitor is due immediately
+  regardless of its interval. Commit and push it from `~/metacortex`.
+- **`config.toml`** needs `launchctl kickstart -k gui/$(id -u)/com.kim.xa-daemon`.
+  The daemon calls `config.load()` once at startup, so edited thresholds,
+  options, intervals and actions are invisible to it until it restarts.
+  Thresholds set with `xa threshold` live in sqlite instead and apply at once.
+- **Engine code**, in this repository, also needs that kickstart. The install is
+  editable, so the files change under a process that already imported the old
+  modules.
 
-Engine change, in this repository:
+## Reading the output honestly
 
-```sh
-git push                                     # only when asked
-ssh carica 'cd ~/projects/xa && git pull --ff-only'
-ssh carica 'launchctl kickstart -k gui/$(id -u)/com.kim.xa-daemon'
-```
+The header age is daemon liveness: when the snapshot was last published, not
+when each monitor last ran. A monitor that has not been due in six hours is
+still shown, and its report is still the last one it made. To check freshness
+per monitor, read `ok` and `collected_at` in `xa --json`, or force a full sweep
+with `xa collect --force`.
 
-The restart is not optional. The install is editable, so the pull updates the
-files on disk, but the daemon process imported the old modules at startup and
-will go on running them for as long as it lives.
+Two ways collection stops without anything looking wrong: this is a laptop, so
+it collects nothing while asleep; and a LaunchAgent only runs in a logged-in
+GUI session, so a reboot that stops at the login window collects nothing
+either. A monitor that fails is retried after five minutes rather than its full
+interval, so waking with no network costs minutes, not hours.
 
-Policy change, in `~/metacortex/xa`:
+## Working here
 
-```sh
-cd ~/metacortex && git push                  # only when asked
-ssh carica 'cd ~/metacortex && git pull --ff-only --no-rebase'
-```
+`scripts/install.sh` is idempotent; run it after changing a plist. The engine is
+pure stdlib apart from the optional TUI, and it should stay that way: a
+dependency on the read path is a dependency on a good day.
 
-No restart needed for a monitor executable: `due()` hashes the file's bytes on
-disk every tick, so a changed monitor is due immediately regardless of its
-interval, and the new rows appear within a minute. `config.toml` is the
-exception, and does need the kickstart above: the daemon calls `config.load()`
-once at startup, so edited thresholds, options, intervals and actions are
-invisible to it until it restarts. Thresholds changed with `xa threshold` live
-in sqlite instead and take effect without one.
-
-Prompts are read at use time by whichever machine runs the action: persica for
-`xa open`, carica for a monitor in `investigate` or `auto` mode. Keep both
-current rather than reasoning about which one will need it.
-
-## Verifying that it landed
-
-```sh
-ssh carica 'tail -5 ~/.local/state/xa/daemon.log'   # "snapshot: N item(s), M fault(s)"
-xa                                                  # after one sync interval
-```
-
-Watch the item count change, then read the row. Saying a fix is live without
-having seen it come back from carica is how the afternoon above was spent.
-
-## Everything domain-specific lives in the policy directory
-
-The engine knows nothing about mathlib, Zulip or GitHub. If a change needs a
-domain-specific string, it belongs in `~/metacortex/xa` (a separate git
-repository, `kim-em/metacortex`), not here. A monitor that reads a threshold,
-decides a severity or knows about acknowledgements is in the wrong layer; see
-README.md for the split and `src/xa/monitors/lib.py` for the contract.
+`.venv/bin/pytest` here, and `~/projects/xa/.venv/bin/pytest tests/` in
+`~/metacortex/xa` for the monitors.

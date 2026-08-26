@@ -100,24 +100,23 @@ The contract:
 
 ## Running it continuously
 
-One host collects; every other machine reads a cached copy.
-
 ```sh
-scripts/install.sh daemon    # on the collecting host
-scripts/install.sh client    # everywhere else
+scripts/install.sh
 ```
 
-The daemon runs monitors on their schedules, writes `snapshot.json`, and serves
-it over HTTP. There is no authentication on the write endpoint, so bind it to a
-private address (a tailscale one, or `127.0.0.1`) and let the network be the
-access control. Anyone who can reach the port can silence an alert. `xa-sync` pulls that snapshot to `~/.cache/xa` every thirty
-seconds, so `xa` reads a local file and never touches the network. A test
-asserts the read path opens no socket.
+A launchd agent runs the collector. It works through the monitors on their own
+intervals, writes `snapshot.json`, and `xa` reads that file: asking never starts
+work, and the read path opens no socket. A test asserts exactly that, including
+for `xa ack`.
 
-Writes go the other way. An acknowledgement is sent to the daemon, and if that
-fails it queues in `~/.cache/xa/outbox.jsonl` for `xa-sync` to deliver later.
-The local snapshot updates immediately either way, so acknowledging something
-on a plane behaves exactly like acknowledging it at a desk.
+One machine collects, and it is the machine you read on. A monitor that needs
+something from another host reaches it itself, over ssh, which keeps the
+awkward part inside the monitor that cares rather than in the engine. If the
+collector is asleep, nothing collects; the header age tells you so, because it
+is written here.
+
+A monitor that fails is retried in five minutes rather than after its full
+interval, which matters on a machine that wakes with no network.
 
 ```sh
 xa tui                       # the same verbs, one keystroke each
@@ -136,8 +135,6 @@ src/xa/cli.py       the `xa` command
 src/xa/actions.py   prompt rendering and session launching
 src/xa/template.py  the small mustache subset prompts are written in
 src/xa/daemon.py    the collector loop
-src/xa/server.py    HTTP: snapshot out, acknowledgements in
-src/xa/sync.py      client-side cache refresh and outbox drain
 src/xa/tui.py       the interactive view
 ```
 

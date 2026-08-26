@@ -61,22 +61,6 @@ def _store():
     return Store(db_path())
 
 
-def _forward(body: dict) -> None:
-    """Send a mutation to the collector, queueing it if that fails.
-
-    Writes are allowed to be slow, but not to block: the timeout is short, and
-    anything undeliverable goes to the outbox for `xa-sync` to retry. An
-    acknowledgement typed while disconnected is still an acknowledgement.
-    """
-    from .sync import post, queue_write
-
-    cfg = config_mod.load()
-    try:
-        post(f"{cfg.daemon_url.rstrip('/')}/act", body, timeout=2.0)
-    except Exception:
-        queue_write(body)
-
-
 def _mark(args, disposition: str, until_text: str | None, note: str = "") -> int:
     """Shared implementation of ack, snooze and mute."""
     snapshot = _load_snapshot()
@@ -96,25 +80,17 @@ def _mark(args, disposition: str, until_text: str | None, note: str = "") -> int
 
     store = _store()
     store.suppress(item["uid"], state_key, disposition, until, note)
-    _forward({
-        "op": {"acked": "ack", "snoozed": "snooze", "muted": "mute"}[disposition],
-        "uid": item["uid"], "state_key": item["state_key"],
-        "when": until_text, "note": note,
-    })
 
-    # Update the local snapshot optimistically, so the next read reflects this
-    # immediately even if the daemon is unreachable.
+    # Update the snapshot optimistically rather than waiting for the collector
+    # to publish again, so the next read reflects this within the second.
     for i in snapshot.get("items", []):
         if i["uid"] == item["uid"]:
             i["disposition"] = disposition
             i["suppressed_until"] = until.isoformat() if until else None
             i["counts"] = False
-    from .collect import write_snapshot
+    from .collect import write_snapshot_json
 
-    snapshot_path().parent.mkdir(parents=True, exist_ok=True)
-    tmp = snapshot_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(snapshot, indent=1))
-    tmp.replace(snapshot_path())
+    write_snapshot_json(snapshot, snapshot_path())
 
     when = f" until {until.astimezone().strftime('%a %d %b %H:%M')}" if until else ""
     print(f"{disposition}: {item['uid']}{when}")
@@ -169,7 +145,6 @@ def cmd_unmute(args) -> int:
     except SystemExit:
         uid = args.item
     removed = _store().unsuppress(uid)
-    _forward({"op": "unmute", "uid": uid})
     print(f"cleared {removed} suppression(s) for {uid}")
     return 0
 
@@ -178,17 +153,11 @@ def cmd_suppressions(args) -> int:
     from .model import parse_ts
 
     now = utcnow()
-    # Prefer the snapshot: on a machine that is not the collector, the local
-    # database is a write-ahead log, not the truth. Showing it would let this
-    # disagree with what is actually silenced.
-    snapshot = _load_snapshot()
-    rows = snapshot.get("suppressions")
-    if rows is None:
-        rows = [
-            {"uid": s.uid, "state_key": s.state_key, "disposition": s.disposition,
-             "until": s.until.isoformat() if s.until else None, "note": s.note}
-            for s in _store().suppressions()
-        ]
+    rows = [
+        {"uid": s.uid, "state_key": s.state_key, "disposition": s.disposition,
+         "until": s.until.isoformat() if s.until else None, "note": s.note}
+        for s in _store().suppressions()
+    ]
     if not rows:
         print("no suppressions")
         return 0
@@ -220,7 +189,6 @@ def cmd_mode(args) -> int:
     if args.mode == "auto" and not cfg.autonomy_enabled:
         print("note: autonomy_enabled is false in config.toml, so `auto` stays inert", file=sys.stderr)
     store.set_mode(args.monitor, args.mode)
-    _forward({"op": "mode", "monitor": args.monitor, "mode": args.mode})
     print(f"{args.monitor}: mode = {args.mode}")
     return 0
 
@@ -243,7 +211,6 @@ def cmd_threshold(args) -> int:
 
     if args.value in ("default", "unset", "-"):
         _store().execute("DELETE FROM overrides WHERE monitor=? AND name=?", (monitor, field))
-        _forward({"op": "threshold", "monitor": monitor, "name": field, "value": None})
         print(f"{args.name} back to the config default")
         return 0
 
@@ -253,7 +220,6 @@ def cmd_threshold(args) -> int:
         parse_duration(args.value)  # validate before storing
         value = args.value
     _store().set_override(monitor, field, value)
-    _forward({"op": "threshold", "monitor": monitor, "name": field, "value": value})
     print(f"{args.name} = {value}")
     return 0
 
