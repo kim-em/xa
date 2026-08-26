@@ -123,6 +123,7 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     faults = [i for i in items if i["kind"] == "fault"]
     pending = [i for i in items if i["kind"] == "pending"]
     backlog = [i for i in items if i["kind"] == "backlog"]
+    status = [i for i in items if i["kind"] == "status"]
 
     name_w = min(34, max([len(i["uid"]) for i in items], default=20))
 
@@ -159,10 +160,22 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
             if i.get("metrics"):
                 out.append(" " * (name_w + 6) + _metrics_line(i["metrics"]))
 
+    if status:
+        out.append("")
+        out.append(paint("STATUS", "1"))
+        for i in status:
+            line = f"    {i['uid'][:name_w]:<{name_w}}  {i['title']}"
+            out.append(line)
+            if i.get("metrics"):
+                out.append(" " * (name_w + 6) + _metrics_line(i["metrics"]))
+
     healthy = [
         m["name"]
         for m in snapshot.get("monitors", [])
-        if m.get("ok") and not any(x["monitor"] == m["name"] and x["kind"] != "backlog" for x in all_items)
+        if m.get("ok") and not any(
+            x["monitor"] == m["name"] and x["kind"] not in ("backlog", "status")
+            for x in all_items
+        )
     ]
     if healthy:
         out.append("")

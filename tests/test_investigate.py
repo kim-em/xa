@@ -44,6 +44,11 @@ def test_does_not_investigate_a_backlog(tmp_path):
     assert not wanted(item(kind="backlog"), store(tmp_path))
 
 
+def test_does_not_investigate_status(tmp_path):
+    """Status is context, not an incident to look into."""
+    assert not wanted(item(kind="status"), store(tmp_path))
+
+
 def test_does_not_investigate_an_item_with_no_action(tmp_path):
     assert not wanted(item(actions=()), store(tmp_path))
 

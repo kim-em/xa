@@ -22,7 +22,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Static
 from .model import parse_ts, utcnow
 from .policy import humanise
 
-KIND_ORDER = {"fault": 0, "pending": 1, "backlog": 2}
+KIND_ORDER = {"fault": 0, "pending": 1, "backlog": 2, "status": 3}
 SEVERITY_STYLE = {"alert": "bold red", "warn": "yellow", "unknown": "magenta", "info": "dim"}
 
 

@@ -26,6 +26,7 @@ in the background and `xa` reads a file.
   {pending}  nothing is broken; a decision is waiting on you.
   {backlog}  a standing pile, reported as metrics and a trend. Never a list,
            because some of these are four figures long.
+  {status}  useful context about a healthy system; no response is expected.
 
 Every fault and pending decision offers an action. An item nobody can act on is
 a notification, not an alert, and `xa doctor` will tell you if one creeps in.
@@ -257,12 +258,13 @@ def render(topic: str | None = None) -> str:
     if topic is None:
         return _fmt(
             OVERVIEW, "xa: external amygdala",
-            kinds="Three kinds of thing", looking="Looking",
+            kinds="Four kinds of thing", looking="Looking",
             responding="Responding", changing="Changing what it does",
             more="More",
             _fault=paint("fault".ljust(7), "31"),
             _pending=paint("pending", "33"),
             _backlog=dim("backlog"),
+            _status=dim("status"),
         )
 
     key = topic.lower().lstrip("-")

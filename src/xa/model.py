@@ -18,10 +18,11 @@ from typing import Any, Literal
 # `fault`: something is wrong and could in principle be fixed.
 # `pending`: nothing is broken; a decision is waiting on the user.
 # `backlog`: a standing pile, reported as metrics and a trend, never as a list.
+# `status`: useful context about a healthy system; no response is expected.
 #
 # Only faults contribute to the count and are eligible for push. The count is
 # the scarce resource: a badge reading 7 has to mean seven things are wrong.
-Kind = Literal["fault", "pending", "backlog"]
+Kind = Literal["fault", "pending", "backlog", "status"]
 
 # `info`: emitted, but too young to have crossed a threshold. Shown, not counted.
 # `warn` / `alert`: crossed `warn_after` / `alert_after`.
@@ -104,7 +105,7 @@ class Observation:
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "Observation":
         kind = raw.get("kind", "fault")
-        if kind not in ("fault", "pending", "backlog"):
+        if kind not in ("fault", "pending", "backlog", "status"):
             raise ValueError(f"unknown kind {kind!r} for observation {raw.get('key')!r}")
         return cls(
             key=str(raw["key"]),

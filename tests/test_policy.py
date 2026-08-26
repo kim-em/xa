@@ -89,6 +89,12 @@ def test_backlog_never_escalates():
     assert severity_for(obs(kind="backlog", since=NOW - timedelta(days=400)), th, NOW) == "info"
 
 
+def test_status_never_escalates():
+    """Healthy context is never something that needs the user."""
+    th = Thresholds(warn_after=timedelta(0), alert_after=timedelta(0))
+    assert severity_for(obs(kind="status", since=NOW - timedelta(days=400)), th, NOW) == "info"
+
+
 def test_stale_data_is_unknown_not_ok():
     th = Thresholds(warn_after=timedelta(0))
     assert severity_for(obs(since=NOW), th, NOW, stale=True) == "unknown"
@@ -195,6 +201,7 @@ def test_only_faults_past_a_threshold_count():
             obs(key="new", since=NOW),                                          # too young
             obs(key="pend", kind="pending", since=NOW - timedelta(days=9)),     # not a fault
             obs(key="back", kind="backlog", since=NOW - timedelta(days=9)),     # not a fault
+            obs(key="status", kind="status", since=NOW - timedelta(days=9)),    # not a fault
         ],
     )
     items = build_items([report], policies, now=NOW)

@@ -20,7 +20,7 @@ severity, never reads a threshold, never knows about acknowledgements. That
 split is why "how long overdue matters" is a config edit rather than a code
 change, and why someone else's monitors run unchanged on this engine.
 
-Three kinds of thing, because they need different treatment:
+Four kinds of thing, because they need different treatment:
 
 - **fault** - something is wrong. Only faults contribute to the count and are
   eligible for a phone push. The count is the scarce resource: a badge reading
@@ -28,6 +28,7 @@ Three kinds of thing, because they need different treatment:
 - **pending** - nothing is broken; a decision is waiting on you.
 - **backlog** - a standing pile, reported as metrics and a trend, never as a
   list. Some queues are four figures long and will never fit on a screen.
+- **status** - useful context about a healthy system; no response is expected.
 
 ## Using it
 

@@ -158,9 +158,9 @@ def severity_for(
     """Map an observation plus its age onto a severity."""
     if stale:
         return "unknown"
-    if obs.kind == "backlog":
-        # Backlogs are a number with a trend. They never escalate on age, or
-        # every standing pile would permanently read as an emergency.
+    if obs.kind in ("backlog", "status"):
+        # Backlogs and status rows are context, not incidents. They never
+        # escalate on age, or standing information would become an emergency.
         return "info"
     if obs.since is None:
         # No start time means we cannot age it. Report it, do not escalate it.
@@ -341,5 +341,5 @@ def build_items(
 def sort_key(item: Item, now: datetime | None = None):
     """Most urgent first, then oldest first within a severity."""
     now = now or utcnow()
-    kind_rank = {"fault": 0, "pending": 1, "backlog": 2}[item.obs.kind]
+    kind_rank = {"fault": 0, "pending": 1, "backlog": 2, "status": 3}[item.obs.kind]
     return (kind_rank, -SEVERITY_ORDER[item.severity], -(item.age(now) or 0))
