@@ -206,6 +206,31 @@ class StoredPlan:
     from_agent: bool = True
 
 
+@dataclass(slots=True, frozen=True)
+class WorkSession:
+    """One agent session working on one exact item state."""
+
+    uid: str
+    state_key: str
+    monitor: str
+    action: str
+    agent: str
+    status: str
+    marker: str
+    session_name: str | None
+    started_at: datetime
+    updated_at: datetime
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "agent": self.agent,
+            "status": self.status,
+            "started_at": self.started_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+
 @dataclass(slots=True)
 class Item:
     """An observation with policy applied. This is what the user sees."""
@@ -226,6 +251,10 @@ class Item:
     # still has text worth reading, but it is not an answer, and presenting it
     # as one is how a half-finished report gets acted on.
     plan_ok: bool = True
+    # A working session for this state, or an unfinished session on this item.
+    # Completed work is exact-state only; unfinished work follows the stable
+    # item UID so a monitor refresh cannot make a live editor disappear.
+    work: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def key(self) -> str:
@@ -262,6 +291,7 @@ class Item:
             "mode": self.mode,
             "plan": self.plan,
             "plan_ok": self.plan_ok,
+            "work": self.work,
             "counts": self.counts,
             **self.obs.to_json(),
         }

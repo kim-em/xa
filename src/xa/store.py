@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from .model import StoredPlan, parse_ts, utcnow
+from .model import StoredPlan, WorkSession, parse_ts, utcnow
 from .policy import Suppression
 
 SCHEMA = """
@@ -112,6 +112,23 @@ CREATE TABLE IF NOT EXISTS actions_log (
     agent    TEXT NOT NULL,
     mode     TEXT NOT NULL,
     detail   TEXT NOT NULL DEFAULT ''
+);
+
+-- The current working session for one action on an exact item state. This is deliberately
+-- separate from actions_log: the log is an audit trail, while this row has a
+-- lifecycle and is what prevents `xa open` from duplicating live work.
+CREATE TABLE IF NOT EXISTS work_sessions (
+    uid          TEXT NOT NULL,
+    state_key    TEXT NOT NULL,
+    monitor      TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    agent        TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    marker       TEXT NOT NULL DEFAULT '',
+    session_name TEXT,
+    started_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (uid, state_key, action)
 );
 """
 
@@ -419,3 +436,87 @@ class Store:
             " ORDER BY ts DESC LIMIT ?",
             (uid, limit),
         ).fetchall()
+
+    # -- working sessions ------------------------------------------------
+
+    @staticmethod
+    def _work(row: sqlite3.Row | None) -> WorkSession | None:
+        if row is None:
+            return None
+        return WorkSession(
+            uid=row["uid"], state_key=row["state_key"], monitor=row["monitor"],
+            action=row["action"], agent=row["agent"], status=row["status"],
+            marker=row["marker"], session_name=row["session_name"],
+            started_at=parse_ts(row["started_at"]) or utcnow(),
+            updated_at=parse_ts(row["updated_at"]) or utcnow(),
+        )
+
+    @synchronised
+    def start_work(self, uid: str, state_key: str, monitor: str, action: str,
+                   agent: str, marker: str = "", session_name: str | None = None,
+                   started_at: datetime | None = None) -> WorkSession:
+        now = started_at or utcnow()
+        self.db.execute(
+            "INSERT INTO work_sessions"
+            " (uid,state_key,monitor,action,agent,status,marker,session_name,started_at,updated_at)"
+            " VALUES (?,?,?,?,?,'starting',?,?,?,?)"
+            " ON CONFLICT(uid,state_key,action) DO UPDATE SET"
+            " monitor=excluded.monitor, action=excluded.action, agent=excluded.agent,"
+            " status='starting', marker=excluded.marker, session_name=excluded.session_name,"
+            " started_at=excluded.started_at, updated_at=excluded.updated_at",
+            (uid, state_key, monitor, action, agent, marker, session_name,
+             now.isoformat(), now.isoformat()),
+        )
+        return self.work_for(uid, state_key, action)  # type: ignore[return-value]
+
+    @synchronised
+    def set_work_status(self, uid: str, state_key: str, action: str,
+                        status: str) -> WorkSession | None:
+        self.db.execute(
+            "UPDATE work_sessions SET status=?, updated_at=?"
+            " WHERE uid=? AND state_key=? AND action=?",
+            (status, utcnow().isoformat(), uid, state_key, action),
+        )
+        row = self.db.execute(
+            "SELECT * FROM work_sessions WHERE uid=? AND state_key=? AND action=?",
+            (uid, state_key, action),
+        ).fetchone()
+        return self._work(row)
+
+    @synchronised
+    def set_work_session_name(self, uid: str, state_key: str, action: str,
+                              session_name: str) -> WorkSession | None:
+        self.db.execute(
+            "UPDATE work_sessions SET session_name=?, updated_at=?"
+            " WHERE uid=? AND state_key=? AND action=?",
+            (session_name, utcnow().isoformat(), uid, state_key, action),
+        )
+        return self.work_for(uid, state_key, action)
+
+    @synchronised
+    def work_for(self, uid: str, state_key: str, action: str) -> WorkSession | None:
+        row = self.db.execute(
+            "SELECT * FROM work_sessions WHERE uid=? AND state_key=? AND action=?",
+            (uid, state_key, action),
+        ).fetchone()
+        return self._work(row)
+
+    @synchronised
+    def unfinished_work_for(self, uid: str, action: str | None = None) -> WorkSession | None:
+        sql = (
+            "SELECT * FROM work_sessions WHERE uid=?"
+            " AND status IN ('starting','active')"
+        )
+        params: tuple[str, ...] = (uid,)
+        if action is not None:
+            sql += " AND action=?"
+            params += (action,)
+        row = self.db.execute(sql + " ORDER BY updated_at DESC LIMIT 1", params).fetchone()
+        return self._work(row)
+
+    @synchronised
+    def unfinished_work(self) -> list[WorkSession]:
+        rows = self.db.execute(
+            "SELECT * FROM work_sessions WHERE status IN ('starting','active')"
+        ).fetchall()
+        return [work for row in rows if (work := self._work(row)) is not None]

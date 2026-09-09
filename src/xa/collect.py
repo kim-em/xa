@@ -193,6 +193,7 @@ def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
     published is a snapshot that is read; there is no such thing as a draft.
     """
     from .investigate import attach
+    from .work import attach as attach_work
 
     policies = effective_policies(cfg, store)
 

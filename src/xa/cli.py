@@ -10,6 +10,7 @@ Writes are a different matter, and are allowed to be slow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -61,11 +62,53 @@ def _store():
     return Store(db_path())
 
 
+def _work_marker(uid: str, state_key: str, action: str) -> Path:
+    token = hashlib.sha256(f"{uid}\0{state_key}\0{action}".encode()).hexdigest()[:20]
+    return config_mod.state_dir() / "work" / f"{token}.state"
+
+
+def _publish_work(snapshot: dict[str, Any], uid: str, work) -> None:
+    for item in snapshot.get("items", []):
+        if item["uid"] == uid:
+            item.setdefault("work", {})[work.action] = work.to_json()
+    from .collect import write_snapshot_json
+
+    write_snapshot_json(snapshot, snapshot_path())
+
+
+def _finalize_work(
+    uid: str, state_key: str, action: str, monitor: str,
+    session_name: str, status: str,
+) -> None:
+    """Finalize long-running work in a coherent, new interpreter."""
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "xa.finish_work",
+            uid, state_key, action, monitor, session_name, status,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "finalization failed").strip()
+        raise RuntimeError(f"could not finish work on {uid}: {detail}")
+
+
 def _mark(args, disposition: str, until_text: str | None, note: str = "") -> int:
     """Shared implementation of ack, snooze and mute."""
     snapshot = _load_snapshot()
     item = _find(snapshot, args.item)
     cfg = config_mod.load()
+
+    if (
+        disposition == "muted"
+        and item.get("cluster_key")
+        and (item.get("evidence") or {}).get("cluster_members")
+    ):
+        raise SystemExit(
+            f"xa: {item['uid']} is a summary; mute one of the members listed by"
+            f" `xa why {item['uid']}`"
+        )
 
     if disposition == "muted":
         # A false positive will never be right, so it binds to every state.
@@ -289,9 +332,29 @@ def cmd_open(args) -> int:
 
     try:
         action = resolve(item, cfg, args.action)
+        previous = store.work_for(item["uid"], item["state_key"], action.id)
+        if previous is None or previous.status == "failed":
+            previous = store.unfinished_work_for(item["uid"], action.id)
+        reopening = (
+            previous is not None
+            and previous.action == action.id
+            and previous.status != "failed"
+            and (
+                action.kind == "escalate"
+                or action.kind == "session" and previous.status in ("starting", "active")
+            )
+        )
+        chosen_agent = (agent or previous.agent) if reopening else (agent or action.agent)
         inspecting = args.dry_run or args.show_prompt
-        launch = plan(item, action, cfg, agent, ensure=not inspecting,
-                      investigation=investigation)
+        marker = Path(previous.marker) if reopening and previous.marker else _work_marker(
+            item["uid"], item["state_key"], action.id
+        )
+        launch = plan(item, action, cfg, chosen_agent if reopening else agent,
+                      ensure=not inspecting,
+                      investigation=investigation, resume=reopening,
+                      lifecycle=marker if action.kind == "escalate" and not reopening else None)
+        if reopening and action.kind == "session":
+            launch = session_focus_launch(launch, previous.session_name)
     except ActionError as exc:
         raise SystemExit(f"xa: {exc}")
 
@@ -304,10 +367,65 @@ def cmd_open(args) -> int:
         print(launch.prompt)
         return 0
 
-    store.log_action(item["uid"], action.id, agent or action.agent, "manual",
+    if reopening:
+        work = previous
+        if work.status == "finished":
+            if work.marker:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("starting\n")
+            work = store.set_work_status(
+                previous.uid, previous.state_key, previous.action, "starting"
+            )
+        _publish_work(snapshot, item["uid"], work)
+        print(f"Reopening {action.label.lower()} → {work.agent} in {launch.cwd}")
+        rc = execute(launch)
+        if rc != 0:
+            failed = store.set_work_status(
+                previous.uid, previous.state_key, previous.action, "failed"
+            )
+            _publish_work(snapshot, item["uid"], failed)
+        return rc
+
+    marker_text = str(marker) if action.kind == "escalate" else ""
+    if marker_text:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("starting\n")
+    work = store.start_work(
+        item["uid"], item["state_key"], item["monitor"], action.id,
+        chosen_agent, marker=marker_text,
+    )
+    if action.kind != "escalate":
+        work = store.set_work_status(
+            item["uid"], item["state_key"], action.id, "active"
+        )
+    _publish_work(snapshot, item["uid"], work)
+    store.log_action(item["uid"], action.id, chosen_agent, "manual",
                      detail=" ".join(launch.command))
-    print(f"{action.label} → {agent or action.agent} in {launch.cwd}")
-    return execute(launch)
+    print(f"{action.label} → {chosen_agent} in {launch.cwd}")
+    launched_session_name = ""
+
+    def record_session_pid(pid: int) -> None:
+        nonlocal launched_session_name
+        launched_session_name = f"pid:{pid}"
+        updated = store.set_work_session_name(
+            item["uid"], item["state_key"], action.id, launched_session_name
+        )
+        if updated is not None:
+            _publish_work(snapshot, item["uid"], updated)
+
+    tracked = action.kind != "escalate"
+    rc = execute(launch, on_started=record_session_pid if tracked else None)
+    if tracked:
+        _finalize_work(
+            item["uid"], item["state_key"], action.id, item["monitor"],
+            launched_session_name, "finished" if rc == 0 else "failed",
+        )
+    elif rc != 0:
+        work = store.set_work_status(
+            item["uid"], item["state_key"], action.id, "failed"
+        )
+        _publish_work(snapshot, item["uid"], work)
+    return rc
 
 
 def cmd_investigate(args) -> int:

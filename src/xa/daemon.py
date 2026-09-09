@@ -26,6 +26,7 @@ from . import config as config_mod
 from .collect import collect, investigate_pending, write_snapshot
 from .jobs import run_due_jobs
 from .store import Store
+from .work import reconcile as reconcile_work
 
 log = logging.getLogger("xa.daemon")
 
@@ -38,12 +39,14 @@ def collector(cfg, store: Store, snapshot_path: Path, once: bool = False) -> Non
     while True:
         try:
             job_results = run_due_jobs(cfg)
+            finished = reconcile_work(store)
+            session_recheck = {work.monitor for work in finished}
             job_recheck = {
                 spec.monitor
                 for result in job_results
                 if (spec := cfg.jobs.get(result["name"])) is not None and spec.monitor
             }
-            recheck = sorted(job_recheck)
+            recheck = sorted(session_recheck | job_recheck)
             snapshot = collect(
                 cfg, store,
                 only=recheck or None,
@@ -51,6 +54,9 @@ def collector(cfg, store: Store, snapshot_path: Path, once: bool = False) -> Non
                 on_progress=lambda s: write_snapshot(s, snapshot_path),
             )
             write_snapshot(snapshot, snapshot_path)
+            if finished:
+                log.info("rechecked %s after %d session(s) finished",
+                         ", ".join(sorted(session_recheck)), len(finished))
             for result in job_results:
                 log.info("job %s: %s", result["name"],
                          "ok" if result["ok"] else result["summary"])

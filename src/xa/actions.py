@@ -15,9 +15,11 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Action, Config
 from .model import StoredPlan, parse_ts, utcnow
@@ -142,8 +144,19 @@ class Launch:
         return f"cd {self.cwd} && " + (f"{env} {command}" if env else command)
 
 
+def session_focus_launch(launch: Launch, session_name: str | None) -> Launch:
+    """Replace a fresh session launch with a request to reveal its live terminal."""
+    if not session_name or not session_name.startswith("pid:"):
+        raise ActionError("the running session has no terminal process to focus")
+    pid = session_name.removeprefix("pid:")
+    uri = "vscode://kim.ai-tmux-restore/focus?" + urllib.parse.urlencode({"pid": pid})
+    command = ["open", uri] if sys.platform == "darwin" else ["code", uri]
+    return Launch(command, launch.cwd, {}, launch.prompt)
+
+
 def plan(item: dict[str, Any], action: Action, cfg: Config, agent: str | None = None,
-         ensure: bool = True, investigation: "StoredPlan | None" = None) -> Launch:
+         ensure: bool = True, investigation: "StoredPlan | None" = None,
+         resume: bool = False, lifecycle: Path | None = None) -> Launch:
     prompt = with_investigation(build_prompt(item, action, cfg), investigation)
     agent = agent or action.agent
     if agent not in ("claude", "codex"):
@@ -186,7 +199,12 @@ def plan(item: dict[str, Any], action: Action, cfg: Config, agent: str | None = 
         command += ["--name", name]
     command.append(target)
 
-    return Launch(command, cwd, {"WT_CLAUDE_PROMPT": prompt, "WT_AGENT": agent}, prompt)
+    env = {"WT_AGENT": agent}
+    if not resume:
+        env["WT_CLAUDE_PROMPT"] = prompt
+    if lifecycle is not None:
+        env["WT_XA_LIFECYCLE_FILE"] = str(lifecycle)
+    return Launch(command, cwd, env, prompt)
 
 
 def ensure_checkout(cwd: Path, repo: str | None, action_id: str) -> None:
@@ -215,11 +233,13 @@ def ensure_checkout(cwd: Path, repo: str | None, action_id: str) -> None:
         raise ActionError(f"could not clone {repo} into {cwd}")
 
 
-def execute(launch: Launch) -> int:
+def execute(launch: Launch, on_started: Callable[[int], None] | None = None) -> int:
     env = dict(os.environ)
     env.update(launch.env)
-    proc = subprocess.run(launch.command, cwd=str(launch.cwd), env=env)
-    return proc.returncode
+    proc = subprocess.Popen(launch.command, cwd=str(launch.cwd), env=env)
+    if on_started is not None:
+        on_started(proc.pid)
+    return proc.wait()
 
 
 BROKEN_MONITOR_PROMPT = """The `{{monitor}}` monitor could not run.

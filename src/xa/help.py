@@ -138,6 +138,13 @@ everything the check already worked out. A session for a failing build starts
 from the failing files, lines and diagnostics, not from a URL and an instruction
 to go and look.
 
+Work is recorded against the item state that launched it, but an unfinished
+session follows the stable item ID if the monitor's evidence changes. While its
+agent is running, the row says so and `xa open` reopens that work rather than
+starting it again. When the agent exits, the daemon immediately re-runs that
+item's monitor. If the work fixed the problem the row disappears; if not, the
+completed attempt remains visible on the unchanged item.
+
 {h_kinds}
 
   escalate   a worktree and a VS Code window on a branch or PR, via wt
