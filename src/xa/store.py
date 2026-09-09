@@ -291,6 +291,13 @@ class Store:
         return row["fingerprint"] if row else None
 
     @synchronised
+    def invalidate_report(self, monitor: str) -> None:
+        """Make a monitor due without discarding the last factual report."""
+        self.db.execute(
+            "UPDATE latest_reports SET fingerprint = '' WHERE monitor = ?", (monitor,)
+        )
+
+    @synchronised
     def latest_reports(self, known: set[str] | None = None) -> list[dict]:
         """Every monitor's most recent report, newest state per monitor.
 

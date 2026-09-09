@@ -187,7 +187,15 @@ def cmd_unmute(args) -> int:
         uid = _find(snapshot, args.item)["uid"]
     except SystemExit:
         uid = args.item
-    removed = _store().unsuppress(uid)
+    store = _store()
+    removed = store.unsuppress(uid)
+    if removed:
+        monitor = uid.partition("/")[0]
+        if monitor in config_mod.load().monitors:
+            # A monitor may have pushed this mute upstream and skipped the
+            # expensive check. Make it due again rather than exposing a cheap
+            # placeholder or waiting out a long interval.
+            store.invalidate_report(monitor)
     print(f"cleared {removed} suppression(s) for {uid}")
     return 0
 

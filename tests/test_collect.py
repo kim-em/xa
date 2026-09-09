@@ -6,10 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from xa.collect import collect, due, write_snapshot, read_snapshot
-from xa.config import Config, MonitorSpec
+from xa.collect import (
+    _env_for,
+    _muted_observation_keys,
+    collect,
+    due,
+    read_snapshot,
+    write_snapshot,
+)
+from xa.config import Action, Config, MonitorSpec
 from xa.model import MonitorReport, Observation, utcnow
-from xa.policy import Thresholds
+from xa.policy import Suppression, Thresholds
 from xa.store import Store
 
 
@@ -159,6 +166,33 @@ def test_changed_options_also_make_a_monitor_due(tmp_path):
 
     s.options = {"threshold": 5}
     assert due(s, st, utcnow(), tmp_path)
+
+
+def test_only_live_wildcard_mutes_are_passed_to_their_monitor(tmp_path):
+    now = utcnow()
+    suppressions = [
+        Suppression("m/stale/org/a", "*", "muted"),
+        Suppression("m/stale/org/b", "state", "muted"),
+        Suppression("other/stale/org/c", "*", "muted"),
+        Suppression("m/stale/org/d", "*", "muted", until=now - timedelta(seconds=1)),
+    ]
+
+    keys = _muted_observation_keys(suppressions, "m", now)
+
+    assert keys == ["stale/org/a"]
+    assert json.loads(_env_for(spec("m"), cfg(tmp_path), keys)["XA_MUTED_KEYS"]) == keys
+
+
+def test_invalidating_a_report_makes_a_long_interval_monitor_due(tmp_path):
+    st, c = store(tmp_path), cfg(tmp_path, spec("m", interval=timedelta(weeks=2)))
+    monitor = c.monitors["m"]
+    st.save_report(report(), monitor.fingerprint(tmp_path))
+    st.record_run("m", utcnow(), True, None, 1)
+    assert not due(monitor, st, utcnow(), tmp_path)
+
+    st.invalidate_report("m")
+
+    assert due(monitor, st, utcnow(), tmp_path)
 
 
 def test_an_existing_database_survives_a_schema_change(tmp_path):

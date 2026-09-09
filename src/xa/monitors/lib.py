@@ -76,6 +76,15 @@ def opt(name: str, default: Any = None) -> Any:
         return raw
 
 
+def muted_keys() -> set[str]:
+    """Observation keys wildcard-muted by the user and safe to skip upstream."""
+    try:
+        values = json.loads(os.environ.get("XA_MUTED_KEYS", "[]"))
+    except json.JSONDecodeError:
+        return set()
+    return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+
 def job_status(name: str) -> dict[str, Any] | None:
     """Read the latest persisted result of a scheduled job."""
     from xa.jobs import read_status

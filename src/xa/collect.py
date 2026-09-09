@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from .config import Config, MonitorSpec
 from .model import Item, MonitorReport, utcnow
-from .policy import MonitorPolicy, Thresholds, build_items, parse_duration, sort_key
+from .policy import MonitorPolicy, Suppression, Thresholds, build_items, parse_duration, sort_key
 from .store import Store
 
 log = logging.getLogger("xa.collect")
@@ -56,11 +56,29 @@ def _suppressions_payload(store: Store) -> list[dict[str, Any]]:
         for s in store.suppressions()
     ]
 
-def _env_for(spec: MonitorSpec, cfg: Config) -> dict[str, str]:
+def _muted_observation_keys(
+    suppressions: Iterable[Suppression], monitor: str, now: datetime,
+) -> list[str]:
+    """Wildcard-muted keys a monitor may safely skip before doing expensive work."""
+    prefix = monitor + "/"
+    return sorted(
+        suppression.uid[len(prefix):]
+        for suppression in suppressions
+        if suppression.disposition == "muted"
+        and suppression.state_key == "*"
+        and suppression.uid.startswith(prefix)
+        and (suppression.until is None or suppression.until > now)
+    )
+
+
+def _env_for(
+    spec: MonitorSpec, cfg: Config, muted_keys: Sequence[str] = (),
+) -> dict[str, str]:
     """Options reach a monitor as `XA_OPT_*`, so it can be tuned without editing."""
     env = dict(os.environ)
     env["XA_POLICY"] = str(cfg.root)
     env["XA_MONITOR"] = spec.name
+    env["XA_MUTED_KEYS"] = json.dumps(list(muted_keys))
     # Let monitors `import xa` without knowing where the engine is installed.
     # Hardcoding a source path in each monitor makes the policy directory
     # non-portable, and the policy directory is meant to outlive any one
@@ -75,7 +93,9 @@ def _env_for(spec: MonitorSpec, cfg: Config) -> dict[str, str]:
     return env
 
 
-def run_monitor(spec: MonitorSpec, cfg: Config) -> tuple[MonitorReport, int]:
+def run_monitor(
+    spec: MonitorSpec, cfg: Config, muted_keys: Sequence[str] = (),
+) -> tuple[MonitorReport, int]:
     """Execute one monitor and parse its report.
 
     A monitor that crashes, times out, or emits unparseable output produces an
@@ -106,7 +126,7 @@ def run_monitor(spec: MonitorSpec, cfg: Config) -> tuple[MonitorReport, int]:
             capture_output=True,
             text=True,
             timeout=spec.timeout.total_seconds(),
-            env=_env_for(spec, cfg),
+            env=_env_for(spec, cfg, muted_keys),
             cwd=str(cfg.root),
         )
     except subprocess.TimeoutExpired:
@@ -264,7 +284,8 @@ def collect(
                 continue
             if not force and not due(spec, store, now, cfg.root):
                 continue
-            report, duration_ms = run_monitor(spec, cfg)
+            muted_keys = _muted_observation_keys(store.suppressions(), name, now)
+            report, duration_ms = run_monitor(spec, cfg, muted_keys)
             store.record_run(name, report.collected_at, report.ok, report.error, duration_ms)
             store.save_report(report, spec.fingerprint(cfg.root))
             collected.append(report)
