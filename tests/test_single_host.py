@@ -120,6 +120,93 @@ def test_the_ack_is_visible_in_the_next_read_without_waiting_for_a_tick(home, no
     assert "something is wrong" not in capsys.readouterr().out
 
 
+def test_refresh_accepts_an_item_id_and_reports_that_it_cleared(
+    home, monkeypatch, capsys
+):
+    from xa.collect import Snapshot, read_snapshot
+
+    def refreshed(cfg, store, only=None, force=False):
+        assert only == ["m"]
+        assert force is True
+        return Snapshot(generated_at=utcnow(), monitors=[{"name": "m", "ok": True}])
+
+    monkeypatch.setattr("xa.collect.collect", refreshed)
+
+    assert cli.main(["refresh", "m/k"]) == 0
+
+    out = capsys.readouterr().out
+    assert "m: refreshed" in out
+    assert "cleared  m/k" in out
+    assert read_snapshot(cli.snapshot_path())["items"] == []
+
+
+def test_a_cluster_member_can_be_muted_without_muting_the_summary(home, capsys):
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    member = dict(
+        snapshot["items"][0], uid="m/stale/org/a", key="stale/org/a",
+        state_key="repo-state", title="org/a is stale",
+        evidence={"repo": "org/a"}, cluster_key="stale",
+        cluster_title="{count} repositories are stale", cluster_metric="stale",
+    )
+    snapshot["items"][0].update(
+        uid="m/stale", key="stale", title="1 repositories are stale",
+        cluster_size=1, cluster_key="stale",
+        cluster_title="{count} repositories are stale", cluster_metric="stale",
+        metrics={"stale": 1}, evidence={"cluster_members": [member]},
+    )
+    cli.snapshot_path().write_text(json.dumps(snapshot))
+
+    assert cli.main(["mute", "m/stale/org/a"]) == 0
+
+    assert [s.uid for s in Store(cli.db_path()).suppressions()] == ["m/stale/org/a"]
+    assert json.loads(cli.snapshot_path().read_text())["items"] == []
+    assert "muted: m/stale/org/a" in capsys.readouterr().out
+
+
+def test_mute_refuses_an_addressable_cluster_summary(home):
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    snapshot["items"][0].update(
+        uid="m/stale", key="stale", cluster_key="stale",
+        evidence={"cluster_members": [{"uid": "m/stale/org/a"}]},
+    )
+    cli.snapshot_path().write_text(json.dumps(snapshot))
+
+    with pytest.raises(SystemExit, match="mute one of the members"):
+        cli.main(["mute", "m/stale"])
+
+
+def test_prompt_explains_when_given_an_item_id(home):
+    (home / "policy" / "config.toml").write_text(
+        CONFIG
+        + """
+offer = ["fix"]
+
+[[monitor.m.actions]]
+id = "fix"
+label = "Fix it"
+prompt = "prompts/fix.md"
+"""
+    )
+    (home / "policy" / "prompts").mkdir()
+    (home / "policy" / "prompts" / "fix.md").write_text("Fix it")
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    snapshot["items"][0]["actions"] = ["fix"]
+    cli.snapshot_path().write_text(json.dumps(snapshot))
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["prompt", "m/k"])
+
+    message = str(raised.value)
+    assert "is an item ID" in message
+    assert "xa open m/k --show-prompt" in message
+    assert "xa prompt m.fix" in message
+
+
+def test_prompt_unknown_action_points_at_the_action_list(home):
+    with pytest.raises(SystemExit, match="xa actions"):
+        cli.main(["prompt", "not-an-action"])
+
+
 def test_nothing_in_the_engine_imports_aiohttp():
     """The HTTP server was the only reason for a third-party dependency."""
     import xa

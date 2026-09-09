@@ -68,6 +68,25 @@ def test_humanise():
     assert humanise(None) == "-"
 
 
+def test_labeled_links_round_trip_through_the_monitor_model():
+    links = [{"label": "Discussion", "url": "https://example.test/topic/1"}]
+    observation = Observation.from_json({"key": "k", "title": "t", "links": links})
+    assert observation.to_json()["links"] == links
+
+
+def test_why_label_round_trips_through_the_monitor_model():
+    observation = Observation.from_json(
+        {"key": "k", "title": "t", "why_label": "Choose what to stop watching"}
+    )
+    assert observation.to_json()["why_label"] == "Choose what to stop watching"
+
+
+def test_direct_commands_round_trip_through_the_monitor_model():
+    commands = [{"label": "Run it", "command": "xa run backup"}]
+    observation = Observation.from_json({"key": "k", "title": "t", "commands": commands})
+    assert observation.to_json()["commands"] == commands
+
+
 # -- thresholds -------------------------------------------------------------
 
 def test_severity_ladder():
@@ -221,3 +240,63 @@ def test_cluster_keeps_its_members():
     members = head.obs.evidence["cluster_members"]
     assert [m["title"] for m in members] == ["second"]
     assert head.cluster_size == 2
+
+
+def test_addressable_cluster_builds_a_stable_summary_with_full_members():
+    import json
+
+    common = {
+        "cluster": "stale-members",
+        "cluster_key": "stale",
+        "cluster_title": "{count} repositories are stale",
+        "cluster_metric": "stale",
+    }
+    a = Item(
+        monitor="tools",
+        obs=obs(key="stale/org/a", state_key="sa", evidence={"repo": "org/a"},
+                metrics={"stale": 1}, **common),
+    )
+    b = Item(
+        monitor="tools",
+        obs=obs(key="stale/org/b", state_key="sb", evidence={"repo": "org/b"},
+                metrics={"stale": 1}, **common),
+    )
+
+    summary = cluster([a, b])[0]
+
+    assert summary.uid == "tools/stale"
+    assert summary.obs.title == "2 repositories are stale"
+    assert summary.obs.metrics["stale"] == 2
+    assert [m["uid"] for m in summary.obs.evidence["cluster_members"]] == [
+        "tools/stale/org/a", "tools/stale/org/b",
+    ]
+    json.dumps(summary.to_json())
+
+
+def test_muted_member_is_not_folded_back_into_the_active_cluster():
+    common = {
+        "cluster": "stale-members",
+        "cluster_key": "stale",
+        "cluster_title": "{count} repositories are stale",
+    }
+    report = MonitorReport(
+        "tools",
+        collected_at=NOW,
+        observations=[
+            obs(key="stale/org/a", state_key="sa", **common),
+            obs(key="stale/org/b", state_key="sb", **common),
+        ],
+    )
+
+    items = build_items(
+        [report], {}, [Suppression("tools/stale/org/b", "*", "muted")], now=NOW
+    )
+
+    active = next(item for item in items if item.disposition == "active")
+    muted = next(item for item in items if item.disposition == "muted")
+    assert active.uid == "tools/stale"
+    assert active.obs.title == "1 repositories are stale"
+    assert [m["uid"] for m in active.obs.evidence["cluster_members"]] == [
+        "tools/stale/org/a"
+    ]
+    assert muted.uid == "tools/stale/org/b"

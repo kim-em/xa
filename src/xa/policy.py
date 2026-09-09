@@ -6,6 +6,8 @@ reason "how long overdue matters" is a config edit rather than a code change.
 
 from __future__ import annotations
 
+import hashlib
+import copy
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time, timezone
@@ -231,9 +233,13 @@ def cluster(items: Sequence[Item]) -> list[Item]:
     """
     out: list[Item] = []
     seen: dict[tuple[str, str], Item] = {}
+    summary_members: dict[tuple[str, str], list[dict]] = {}
     for item in items:
         label = item.obs.cluster
-        if not label:
+        # Suppressions apply to individual facts before presentation. Folding a
+        # muted member back into an active cluster would make selective mute a
+        # lie: the count and agent evidence would still include it.
+        if not label or item.disposition != "active":
             out.append(item)
             continue
         ck = (item.monitor, label)
@@ -241,6 +247,8 @@ def cluster(items: Sequence[Item]) -> list[Item]:
         if head is None:
             seen[ck] = item
             out.append(item)
+            if item.obs.cluster_key:
+                summary_members[ck] = [copy.deepcopy(item.to_json())]
             continue
         head.cluster_size += 1
         # The cluster inherits the worst severity and the oldest start, so
@@ -252,11 +260,26 @@ def cluster(items: Sequence[Item]) -> list[Item]:
         # Keep the members. Collapsing a group and discarding what was in it
         # makes the row unanswerable: "13 things, oldest 123 days" tells you
         # nothing about whether any of them is yours or even real.
-        head.obs.evidence.setdefault("cluster_members", []).append(
-            {"key": item.obs.key, "title": item.obs.title,
-             "since": item.obs.since.isoformat() if item.obs.since else None,
-             "url": item.obs.url}
-        )
+        if head.obs.cluster_key:
+            summary_members[ck].append(copy.deepcopy(item.to_json()))
+        else:
+            head.obs.evidence.setdefault("cluster_members", []).append(
+                {"key": item.obs.key, "title": item.obs.title,
+                 "since": item.obs.since.isoformat() if item.obs.since else None,
+                 "url": item.obs.url}
+            )
+
+    for ck, members in summary_members.items():
+        head = seen[ck]
+        head.obs.key = head.obs.cluster_key or head.obs.key
+        if head.obs.cluster_title:
+            head.obs.title = head.obs.cluster_title.format(count=len(members))
+        head.obs.state_key = hashlib.sha256(
+            "\x1f".join(sorted(m["state_key"] for m in members)).encode()
+        ).hexdigest()[:16]
+        if head.obs.cluster_metric:
+            head.obs.metrics[head.obs.cluster_metric] = len(members)
+        head.obs.evidence["cluster_members"] = members
     return out
 
 

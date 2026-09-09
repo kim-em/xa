@@ -154,10 +154,16 @@ class Report:
         detail: str = "",
         since: datetime | None = None,
         url: str | None = None,
+        links: Sequence[dict[str, str]] = (),
         cluster: str | None = None,
+        cluster_key: str | None = None,
+        cluster_title: str | None = None,
+        cluster_metric: str | None = None,
         metrics: dict[str, Any] | None = None,
         evidence: dict[str, Any] | None = None,
         actions: Sequence[str] = (),
+        commands: Sequence[dict[str, str]] = (),
+        why_label: str | None = None,
     ) -> None:
         self.observations.append(
             {
@@ -168,10 +174,16 @@ class Report:
                 "detail": detail,
                 "since": iso(since),
                 "url": url,
+                "links": [dict(link) for link in links],
                 "cluster": cluster,
+                "cluster_key": cluster_key,
+                "cluster_title": cluster_title,
+                "cluster_metric": cluster_metric,
                 "metrics": metrics or {},
                 "evidence": evidence or {},
                 "actions": list(actions),
+                "commands": [dict(command) for command in commands],
+                "why_label": why_label,
             }
         )
 

@@ -36,6 +36,7 @@ a notification, not an alert, and `xa doctor` will tell you if one creeps in.
   xa                    what needs me, now
   xa --json             the same, for scripts, a bot, or a menu bar
   xa why <item>         everything the check already worked out
+  xa refresh <monitor>  re-check one source now after acting outside xa
   xa --all              include what you have silenced
 
 {h_responding}

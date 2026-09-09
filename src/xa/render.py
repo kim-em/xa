@@ -7,8 +7,10 @@ formatting framework costs more startup time than the whole read path.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
+import textwrap
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -42,6 +44,49 @@ def width() -> int:
     return max(60, min(shutil.get_terminal_size((100, 24)).columns, 140))
 
 
+def _wrap_row(prefix: str, text: str, content_col: int) -> list[str]:
+    """Wrap row copy with every continuation aligned under its first word."""
+    chunks = textwrap.wrap(text, width=max(1, width() - content_col)) or [""]
+    return [prefix + chunks[0], *(" " * content_col + chunk for chunk in chunks[1:])]
+
+
+def _action_lines(item: dict[str, Any]) -> list[str]:
+    """Human next steps, with IDs only where choosing between them requires one."""
+    action_ids = item.get("actions") or []
+    labels = item.get("action_labels") or {}
+    several = len(action_ids) > 1
+    lines = []
+    for suggestion in item.get("commands") or []:
+        command = suggestion.get("command")
+        if command:
+            lines.append(
+                f"{suggestion.get('label') or 'Run'}: {paint(str(command), '35')}"
+            )
+    if item.get("why_label"):
+        command = f"xa why {shlex.quote(item['uid'])}"
+        lines.append(f"{item['why_label']}: {paint(command, '35')}")
+    works = item.get("work") or {}
+    for action_id in action_ids:
+        command = f"xa open {shlex.quote(item['uid'])}"
+        if several:
+            command += f" {shlex.quote(action_id)}"
+        label = labels.get(action_id, action_id)
+        work = works.get(action_id) or {}
+        if work.get("status") in ("starting", "active"):
+            label = "Reopen the in-progress session"
+        lines.append(f"{label}: {paint(command, '35')}")
+    return lines
+
+
+def _link_lines(item: dict[str, Any]) -> list[str]:
+    """Labeled destinations, kept as whole logical lines for copy/paste."""
+    return [
+        f"{link.get('label') or 'Link'}: {paint(str(link['url']), '36')}"
+        for link in item.get("links") or []
+        if link.get("url")
+    ]
+
+
 def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
     sev = item["severity"]
     glyph = paint(GLYPH.get(sev, "·"), COLOUR.get(sev, "0"))
@@ -50,13 +95,40 @@ def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
     mark = DISPOSITION_MARK.get(item.get("disposition", "active"), " ")
 
     title = item["title"]
-    if item.get("cluster_size", 1) > 1:
-        title += dim(f"  (+{item['cluster_size'] - 1})")
+    cluster_note = ""
+    if item.get("cluster_size", 1) > 1 and not item.get("cluster_key"):
+        cluster_note = f"(+{item['cluster_size'] - 1})"
+        title += f"  {cluster_note}"
 
-    head = f"  {mark}{glyph} {age:>4}  {item['uid'][:name_w]:<{name_w}}  {title}"
-    lines = [head]
+    content_col = name_w + 13
+    head = f"  {mark}{glyph} {age:>4}  {item['uid'][:name_w]:<{name_w}}  "
+    lines = _wrap_row(head, title, content_col)
+    if cluster_note:
+        lines = [line.replace(cluster_note, dim(cluster_note), 1) for line in lines]
 
-    trailer = []
+    trailer: list[str] = []
+    styled: list[tuple[str, str]] = []
+    works = item.get("work") or {}
+    several_work = len(works) > 1
+    for action_id, work in works.items():
+        name = f"{action_id}: " if several_work else ""
+        if work.get("status") in ("starting", "active"):
+            started = parse_ts(work.get("started_at"))
+            age = humanise((now - started).total_seconds()) if started else "?"
+            changed = ", alert changed" if work.get("state_changed") else ""
+            note = f"[{name}in progress: {work.get('agent', 'agent')}, {age}{changed}]"
+            trailer.append(note)
+            styled.append((note, "36"))
+        elif work.get("status") == "finished":
+            finished = parse_ts(work.get("updated_at"))
+            ago = humanise((now - finished).total_seconds()) if finished else "?"
+            note = f"[{name}session finished {ago} ago; rechecked]"
+            trailer.append(note)
+            styled.append((note, "90"))
+        elif work.get("status") == "failed":
+            note = f"[{name}session failed to open]"
+            trailer.append(note)
+            styled.append((note, "31"))
     if item.get("plan"):
         from .investigate import verdict
 
@@ -65,16 +137,28 @@ def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
             # Say so on the row. A failed investigation that renders as nothing
             # is worse than one that renders as a failure: it looks untouched,
             # so nobody asks why the rung never produced anything.
-            trailer.append(paint("[investigation failed]", "31"))
+            note = "[investigation failed]"
+            trailer.append(note)
+            styled.append((note, "31"))
         elif v.get("fixable"):
             mark = {"yes": "32", "needs-a-decision": "33"}.get(v["fixable"], "90")
-            trailer.append(paint(f"[investigated: {v['fixable']}]", mark))
+            note = f"[investigated: {v['fixable']}]"
+            trailer.append(note)
+            styled.append((note, mark))
     if item.get("detail"):
         trailer.append(item["detail"])
-    if item.get("actions"):
-        trailer.append(dim("[" + " ".join(item["actions"]) + "]"))
     if trailer:
-        lines.append(" " * (name_w + 13) + "  ".join(trailer))
+        wrapped = _wrap_row(" " * content_col, "  ".join(trailer), content_col)
+        for note, colour in styled:
+            wrapped = [line.replace(note, paint(note, colour), 1) for line in wrapped]
+        lines.extend(wrapped)
+    for link in _link_lines(item):
+        lines.append(" " * content_col + paint("↗ ", "36") + link)
+    for action in _action_lines(item):
+        # Commands are the exception to prose wrapping. Let the terminal
+        # soft-wrap the logical line: inserting indentation into the command
+        # makes selecting and pasting the purple text produce a broken command.
+        lines.append(" " * content_col + paint("→ ", "32") + action)
     return lines
 
 
@@ -155,19 +239,25 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
         out.append("")
         out.append(paint("BACKLOG", "1"))
         for i in backlog:
+            content_col = name_w + 6
             line = f"    {i['uid'][:name_w]:<{name_w}}  {i['title']}"
             out.append(line)
             if i.get("metrics"):
-                out.append(" " * (name_w + 6) + _metrics_line(i["metrics"]))
+                out.append(" " * content_col + _metrics_line(i["metrics"]))
+            for action in _action_lines(i):
+                out.append(" " * content_col + paint("→ ", "32") + action)
 
     if status:
         out.append("")
         out.append(paint("STATUS", "1"))
         for i in status:
+            content_col = name_w + 6
             line = f"    {i['uid'][:name_w]:<{name_w}}  {i['title']}"
             out.append(line)
             if i.get("metrics"):
-                out.append(" " * (name_w + 6) + _metrics_line(i["metrics"]))
+                out.append(" " * content_col + _metrics_line(i["metrics"]))
+            for action in _action_lines(i):
+                out.append(" " * content_col + paint("→ ", "32") + action)
 
     healthy = [
         m["name"]
@@ -196,6 +286,10 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
     if not all_items and not broken:
         out.append("")
         out.append(dim("  (no monitors have reported yet: run `xa collect --force`)"))
+
+    if any(i.get("actions") for i in items):
+        out.append("")
+        out.append(dim("Next: xa why <id> · xa investigate <id> · xa open <id>"))
 
     return "\n".join(out)
 
@@ -230,16 +324,37 @@ def _render_detail(item: dict[str, Any], actions_taken: Sequence[Any] = ()) -> s
     if item.get("disposition") != "active":
         until = parse_ts(item.get("suppressed_until"))
         out.append(f"  {item['disposition']:<11} until {until.isoformat() if until else 'further notice'}")
-    if item.get("url"):
+    linked_urls = {link.get("url") for link in item.get("links") or []}
+    if item.get("url") and item["url"] not in linked_urls:
         out.append(f"  url         {item['url']}")
+    links = _link_lines(item)
+    if links:
+        out += ["", paint("  links", "1"), *("    " + link for link in links)]
     if item.get("detail"):
         out += ["", "  " + item["detail"]]
     if item.get("metrics"):
         out += ["", paint("  metrics", "1")]
         for k, v in item["metrics"].items():
             out.append(f"    {k:<24} {v}")
-    if item.get("actions"):
-        out += ["", paint("  actions", "1"), "    " + " ".join(item["actions"])]
+    actions = _action_lines(item)
+    if actions:
+        out += ["", paint("  next", "1"), *("    " + action for action in actions)]
+    works = item.get("work") or {}
+    if works:
+        out += ["", paint("  work", "1")]
+        for action_id, work in works.items():
+            started = parse_ts(work.get("started_at"))
+            updated = parse_ts(work.get("updated_at"))
+            out.append(
+                f"    {action_id}: {work.get('status')} with {work.get('agent')}"
+                + (f" since {started.astimezone().isoformat()}" if started else "")
+            )
+            if work.get("state_changed"):
+                out.append("      the alert changed after this session started")
+            if work.get("status") == "finished" and updated:
+                out.append(
+                    f"      finished and rechecked at {updated.astimezone().isoformat()}"
+                )
     if item.get("plan"):
         from .investigate import verdict
 
@@ -266,11 +381,22 @@ def _render_detail(item: dict[str, Any], actions_taken: Sequence[Any] = ()) -> s
             out.append(f"    {ago:>4} ago   {a['action']} ({a['mode']}, {a['agent']})")
     members = (item.get("evidence") or {}).get("cluster_members")
     if members:
-        out += ["", paint(f"  clustered with {len(members)} other(s)", "1")]
-        for m in members[:20]:
-            when = (m.get("since") or "")[:10]
-            out.append(f"    {when:12} {m['title'][:80]}")
-    if item.get("evidence"):
+        if item.get("cluster_key"):
+            out += ["", paint(f"  members ({len(members)})", "1")]
+            for m in members[:20]:
+                out.append(f"    {m['title'][:100]}")
+                command = f"xa mute {shlex.quote(m['uid'])}"
+                out.append(f"      Stop watching: {paint(command, '35')}")
+        else:
+            out += ["", paint(f"  clustered with {len(members)} other(s)", "1")]
+            for m in members[:20]:
+                when = (m.get("since") or "")[:10]
+                out.append(f"    {when:12} {m['title'][:80]}")
+    # An addressable aggregate stores each complete member observation in its
+    # evidence so nested commands can resolve it. That is engine bookkeeping,
+    # not useful detail: the curated member list above is the human view. An
+    # individual member still shows its ordinary evidence when addressed.
+    if item.get("evidence") and not (item.get("cluster_key") and members):
         out += ["", paint("  evidence", "1")]
         for line in json.dumps(item["evidence"], indent=2).splitlines():
             out.append("    " + line)

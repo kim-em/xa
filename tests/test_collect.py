@@ -99,6 +99,20 @@ def test_snapshot_round_trips_atomically(tmp_path):
     assert not path.with_suffix(".json.tmp").exists()
 
 
+def test_snapshot_carries_human_action_labels(tmp_path):
+    """Status reads only the snapshot, so every word it renders must be there."""
+    st = store(tmp_path)
+    action = Action(id="fix", label="Fix the failing build")
+    c = cfg(tmp_path, spec("m", actions={"fix": action}))
+    r = MonitorReport(
+        monitor="m",
+        observations=[Observation(key="k", title="t", actions=["fix"])],
+    )
+
+    payload = collect(c, st, reports=[r]).to_json()
+    assert payload["items"][0]["action_labels"] == {"fix": "Fix the failing build"}
+
+
 def test_a_missing_executable_reports_unknown_not_health(tmp_path):
     st, c = store(tmp_path), cfg(tmp_path, spec("m"))
     snapshot = collect(c, st, force=True)

@@ -229,10 +229,26 @@ def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
     items = build_items(reports, policies, store.suppressions(), now=now)
     items.sort(key=lambda i: sort_key(i, now))
 
+    # A monitor emits stable action IDs; policy supplies the words a person
+    # needs to understand them. Snapshot the labels alongside the IDs so `xa`
+    # remains a pure read of one file while still presenting a real next step.
+    for item in items:
+        if item.key == "_monitor":
+            item.action_labels = {"fix-monitor": "Fix the monitor"}
+            continue
+        spec = cfg.monitors.get(item.monitor)
+        if spec is not None:
+            item.action_labels = {
+                action_id: spec.actions[action_id].label
+                for action_id in item.obs.actions
+                if action_id in spec.actions
+            }
+
     # Attach any plan already produced for each item's current state. Doing this
     # unconditionally means a plan produced before a monitor was demoted back to
     # `report` still shows, rather than silently disappearing.
     attach(items, store)
+    attach_work(items, store)
 
     return Snapshot(
         generated_at=now,

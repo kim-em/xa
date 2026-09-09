@@ -87,16 +87,35 @@ class Observation:
     detail: str = ""
     since: datetime | None = None
     url: str | None = None
+    # Labeled destinations worth surfacing on the status row. `url` remains
+    # the primary destination for compatibility; links cover cases where the
+    # user can act in more than one place (for example, inspect work or discuss
+    # who should take it).
+    links: list[dict[str, str]] = field(default_factory=list)
     # Items sharing a cluster collapse into one row. Without this the count
     # lies: 26 merge conflicts were really about 12 problems, because 15 of
     # them were one 55-day-old cluster of agent-authored PRs.
     cluster: str | None = None
+    # Opt-in aggregate identity for a cluster whose members must remain
+    # independently addressable. The visible row uses cluster_key and formats
+    # cluster_title with the number of unsuppressed members.
+    cluster_key: str | None = None
+    cluster_title: str | None = None
+    cluster_metric: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
     # Everything an escalated session would otherwise have to re-derive: log
     # excerpts, file lists, diffs. Gathering this is the expensive part, and
     # doing it during collection is what keeps reads instant.
     evidence: dict[str, Any] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
+    # Direct, non-agent commands that are safe to offer as explicit next
+    # steps. This keeps output actionable without pretending every remedy
+    # belongs in `xa open`.
+    commands: list[dict[str, str]] = field(default_factory=list)
+    # Optional human label for surfacing the detail view as a distinct next
+    # step. Most observations need only their primary action; monitors opt in
+    # when `xa why` exposes choices the summary cannot sensibly contain.
+    why_label: str | None = None
 
     def __post_init__(self) -> None:
         if not self.state_key:
@@ -115,10 +134,16 @@ class Observation:
             detail=str(raw.get("detail", "")),
             since=parse_ts(raw.get("since")),
             url=raw.get("url"),
+            links=[dict(link) for link in raw.get("links") or []],
             cluster=raw.get("cluster"),
+            cluster_key=raw.get("cluster_key"),
+            cluster_title=raw.get("cluster_title"),
+            cluster_metric=raw.get("cluster_metric"),
             metrics=dict(raw.get("metrics") or {}),
             evidence=dict(raw.get("evidence") or {}),
             actions=list(raw.get("actions") or []),
+            commands=[dict(command) for command in raw.get("commands") or []],
+            why_label=raw.get("why_label"),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -130,10 +155,16 @@ class Observation:
             "detail": self.detail,
             "since": self.since.isoformat() if self.since else None,
             "url": self.url,
+            "links": self.links,
             "cluster": self.cluster,
+            "cluster_key": self.cluster_key,
+            "cluster_title": self.cluster_title,
+            "cluster_metric": self.cluster_metric,
             "metrics": self.metrics,
             "evidence": self.evidence,
             "actions": self.actions,
+            "commands": self.commands,
+            "why_label": self.why_label,
         }
 
 
@@ -251,6 +282,11 @@ class Item:
     # still has text worth reading, but it is not an answer, and presenting it
     # as one is how a half-finished report gets acted on.
     plan_ok: bool = True
+    # Human labels for the action IDs offered by the observation. These are
+    # copied from policy into the snapshot so the read path can explain the
+    # next step without loading config (and without exposing an internal ID as
+    # though it were a status).
+    action_labels: dict[str, str] = field(default_factory=dict)
     # A working session for this state, or an unfinished session on this item.
     # Completed work is exact-state only; unfinished work follows the stable
     # item UID so a monitor refresh cannot make a live editor disappear.
@@ -291,6 +327,7 @@ class Item:
             "mode": self.mode,
             "plan": self.plan,
             "plan_ok": self.plan_ok,
+            "action_labels": self.action_labels,
             "work": self.work,
             "counts": self.counts,
             **self.obs.to_json(),

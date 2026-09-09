@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import timedelta
@@ -44,10 +45,17 @@ def _load_snapshot() -> dict[str, Any]:
 def _find(snapshot: dict[str, Any], needle: str) -> dict[str, Any]:
     """Resolve a uid, a bare key, or an unambiguous prefix."""
     items = snapshot.get("items", [])
-    exact = [i for i in items if i["uid"] == needle]
+    members = [
+        member
+        for item in items
+        for member in (item.get("evidence") or {}).get("cluster_members", [])
+        if member.get("uid")
+    ]
+    candidates = [*items, *members]
+    exact = [i for i in candidates if i["uid"] == needle]
     if exact:
         return exact[0]
-    partial = [i for i in items if needle in i["uid"]]
+    partial = [i for i in candidates if needle in i["uid"]]
     if len(partial) == 1:
         return partial[0]
     if not partial:
@@ -126,11 +134,50 @@ def _mark(args, disposition: str, until_text: str | None, note: str = "") -> int
 
     # Update the snapshot optimistically rather than waiting for the collector
     # to publish again, so the next read reflects this within the second.
+    cluster_parent = None
     for i in snapshot.get("items", []):
         if i["uid"] == item["uid"]:
             i["disposition"] = disposition
             i["suppressed_until"] = until.isoformat() if until else None
             i["counts"] = False
+        members = (i.get("evidence") or {}).get("cluster_members", [])
+        if any(member.get("uid") == item["uid"] for member in members):
+            cluster_parent = i
+
+    if cluster_parent is not None:
+        remaining = [
+            member
+            for member in cluster_parent["evidence"]["cluster_members"]
+            if member.get("uid") != item["uid"]
+        ]
+        if not remaining:
+            snapshot["items"] = [
+                existing
+                for existing in snapshot.get("items", [])
+                if existing is not cluster_parent
+            ]
+        else:
+            representative = remaining[0]
+            cluster_parent["cluster_size"] = len(remaining)
+            cluster_parent["title"] = cluster_parent["cluster_title"].format(
+                count=len(remaining)
+            )
+            metric = cluster_parent.get("cluster_metric")
+            if metric:
+                cluster_parent.setdefault("metrics", {})[metric] = len(remaining)
+            cluster_parent["state_key"] = hashlib.sha256(
+                "\x1f".join(sorted(m["state_key"] for m in remaining)).encode()
+            ).hexdigest()[:16]
+            for field in ("detail", "since", "url", "links"):
+                cluster_parent[field] = representative.get(field)
+            evidence = dict(representative.get("evidence") or {})
+            evidence["cluster_members"] = remaining
+            cluster_parent["evidence"] = evidence
+    snapshot["count"] = sum(
+        1
+        for existing in snapshot.get("items", [])
+        if existing.get("counts") and existing.get("disposition", "active") == "active"
+    )
     from .collect import write_snapshot_json
 
     write_snapshot_json(snapshot, snapshot_path())
@@ -321,6 +368,50 @@ def cmd_run(args) -> int:
                 f"{failure.get('error', 'failed')}"
             )
     return 0 if status["ok"] else 1
+
+
+def cmd_refresh(args) -> int:
+    """Force one monitor now and summarize how its visible result changed."""
+    from .collect import collect, write_snapshot
+
+    cfg = config_mod.load()
+    before = _load_snapshot()
+    if args.target in cfg.monitors:
+        monitor = args.target
+    else:
+        try:
+            monitor = _find(before, args.target)["monitor"]
+        except SystemExit:
+            raise SystemExit(
+                f"xa: no monitor or item matching {args.target!r}"
+            ) from None
+
+    snapshot = collect(cfg, _store(), only=[monitor], force=True)
+    write_snapshot(snapshot, snapshot_path())
+    after = snapshot.to_json()
+
+    def states(payload: dict[str, Any]) -> dict[str, str]:
+        return {
+            item["uid"]: item["state_key"]
+            for item in payload.get("items", [])
+            if item["monitor"] == monitor
+        }
+
+    old, new = states(before), states(after)
+    cleared = sorted(old.keys() - new.keys())
+    appeared = sorted(new.keys() - old.keys())
+    changed = sorted(uid for uid in old.keys() & new.keys() if old[uid] != new[uid])
+
+    print(f"{monitor}: refreshed")
+    for uid in cleared:
+        print(f"  cleared  {uid}")
+    for uid in appeared:
+        print(f"  new      {uid}")
+    for uid in changed:
+        print(f"  changed  {uid}")
+    if not (cleared or appeared or changed):
+        print("  no visible change")
+    return 0
 
 
 def cmd_open(args) -> int:
@@ -518,7 +609,47 @@ def cmd_prompt(args) -> int:
                     return 0
                 subprocess.run([os.environ.get("EDITOR", "code"), str(path)])
                 return 0
-    raise SystemExit(f"xa: no action named {args.action!r}")
+
+    # This is an easy category error: status and most verbs address item IDs,
+    # while `prompt` addresses the reusable action template. Recognise the item
+    # and point at both useful operations instead of pretending it is unknown.
+    snapshot = _load_snapshot()
+    try:
+        item = _find(snapshot, args.action)
+    except SystemExit:
+        item = None
+    if item is not None and item.get("uid") == args.action:
+        uid = shlex.quote(item["uid"])
+        action_ids = list(item.get("actions") or [])
+        lines = [
+            f"xa: {args.action!r} is an item ID; `xa prompt` expects an action name."
+        ]
+        if action_ids:
+            lines += ["", "To print the prompt rendered for this item:"]
+            several = len(action_ids) > 1
+            for action_id in action_ids:
+                selection = f" {shlex.quote(action_id)}" if several else ""
+                lines.append(f"  xa open {uid}{selection} --show-prompt")
+
+            spec = cfg.monitors.get(item.get("monitor", ""))
+            editable = [
+                action_id
+                for action_id in action_ids
+                if spec is not None
+                and action_id in spec.actions
+                and spec.actions[action_id].prompt
+            ]
+            if editable:
+                lines += ["", "To open the editable template:"]
+                for action_id in editable:
+                    lines.append(f"  xa prompt {spec.name}.{action_id}")
+        else:
+            lines += ["", f"This item offers no action prompt. Inspect it with: xa why {uid}"]
+        raise SystemExit("\n".join(lines))
+
+    raise SystemExit(
+        f"xa: no action named {args.action!r} (run `xa actions` to list action names)"
+    )
 
 
 def cmd_help(args) -> int:
@@ -568,7 +699,9 @@ def cmd_doctor(args) -> int:
     snapshot = _load_snapshot()
     unactionable = [
         i for i in snapshot.get("items", [])
-        if i["kind"] in ("fault", "pending") and not i.get("actions")
+        if i.get("disposition", "active") == "active"
+        and i["kind"] in ("fault", "pending")
+        and not (i.get("actions") or i.get("commands"))
     ]
     if unactionable:
         print(f"\n{len(unactionable)} item(s) with no action (each is a dead end):")
@@ -639,6 +772,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="ignore each monitor's interval")
     s.add_argument("--quiet", action="store_true")
 
+    s = add("refresh", cmd_refresh, "force one monitor to check again now")
+    s.add_argument("target", help="a monitor name or an item ID")
+
     s = add("run", cmd_run, "run a configured mutating job now")
     s.add_argument("job")
 
@@ -661,9 +797,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("what", nargs="?", default="config", choices=["config", "suppressions"])
     s.add_argument("--path", action="store_true", help="print the path instead of opening it")
 
-    s = add("prompt", cmd_prompt, "open an action's prompt template")
-    s.add_argument("action")
-    s.add_argument("--path", action="store_true")
+    s = add(
+        "prompt", cmd_prompt, "open an action's editable prompt template",
+        description=(
+            "Open the editable template for an action. To print the prompt rendered "
+            "for an item, use `xa open <item> [action] --show-prompt`."
+        ),
+    )
+    s.add_argument("action", help="action name from `xa actions`, e.g. toolchains.bump")
+    s.add_argument("--path", action="store_true", help="print the template path instead")
 
     s = add("help", cmd_help, "how xa works (not just what its flags are)")
     s.add_argument("topic", nargs="?",
