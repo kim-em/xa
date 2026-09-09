@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import config as config_mod
 from .collect import collect, investigate_pending, write_snapshot
+from .jobs import run_due_jobs
 from .store import Store
 
 log = logging.getLogger("xa.daemon")
@@ -36,10 +37,23 @@ TICK = timedelta(seconds=30)
 def collector(cfg, store: Store, snapshot_path: Path, once: bool = False) -> None:
     while True:
         try:
+            job_results = run_due_jobs(cfg)
+            job_recheck = {
+                spec.monitor
+                for result in job_results
+                if (spec := cfg.jobs.get(result["name"])) is not None and spec.monitor
+            }
+            recheck = sorted(job_recheck)
             snapshot = collect(
-                cfg, store, on_progress=lambda s: write_snapshot(s, snapshot_path)
+                cfg, store,
+                only=recheck or None,
+                force=bool(recheck),
+                on_progress=lambda s: write_snapshot(s, snapshot_path),
             )
             write_snapshot(snapshot, snapshot_path)
+            for result in job_results:
+                log.info("job %s: %s", result["name"],
+                         "ok" if result["ok"] else result["summary"])
             log.info("snapshot: %d item(s), %d fault(s)", len(snapshot.items), snapshot.count)
 
             # After publishing, so an investigation never delays the picture.

@@ -22,6 +22,7 @@ from .policy import MonitorPolicy, Suppression, Thresholds, parse_duration, pars
 
 DEFAULT_POLICY_DIRS = ("~/metacortex/xa", "~/.config/xa")
 DEFAULT_INTERVAL = timedelta(minutes=30)
+DEFAULT_JOB_RETRY = timedelta(days=1)
 
 
 def policy_dir() -> Path:
@@ -128,9 +129,25 @@ class MonitorSpec:
 
 
 @dataclass(slots=True)
+class JobSpec:
+    """A scheduled mutating task, deliberately separate from observation."""
+
+    name: str
+    exec: str
+    args: list[str] = field(default_factory=list)
+    interval: timedelta = timedelta(weeks=1)
+    retry_after: timedelta = DEFAULT_JOB_RETRY
+    timeout: timedelta = timedelta(minutes=30)
+    enabled: bool = True
+    monitor: str | None = None
+    options: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Config:
     root: Path
     monitors: dict[str, MonitorSpec] = field(default_factory=dict)
+    jobs: dict[str, JobSpec] = field(default_factory=dict)
     # Global kill switch. Even a monitor set to `auto` does nothing while this
     # is false, so there is one place to stop everything.
     autonomy_enabled: bool = False
@@ -146,6 +163,12 @@ class Config:
 
     def policies(self) -> dict[str, MonitorPolicy]:
         return {name: spec.policy for name, spec in self.monitors.items()}
+
+    def job(self, name: str) -> JobSpec:
+        try:
+            return self.jobs[name]
+        except KeyError:
+            raise KeyError(f"no job named {name!r} in {self.root}/config.toml") from None
 
     def resolve(self, relative: str | None) -> Path | None:
         if not relative:
@@ -201,6 +224,20 @@ def load(root: Path | None = None) -> Config:
             actions=actions,
             options=dict(block.get("options") or {}),
             raw=block,
+        )
+    for name, block in (raw.get("job") or {}).items():
+        if not block.get("exec"):
+            raise ValueError(f"job {name!r} has no executable")
+        cfg.jobs[name] = JobSpec(
+            name=name,
+            exec=str(block["exec"]),
+            args=list(block.get("args") or []),
+            interval=parse_duration(block.get("interval")) or timedelta(weeks=1),
+            retry_after=parse_duration(block.get("retry_after")) or DEFAULT_JOB_RETRY,
+            timeout=parse_duration(block.get("timeout")) or timedelta(minutes=30),
+            enabled=bool(block.get("enabled", True)),
+            monitor=block.get("monitor"),
+            options=dict(block.get("options") or {}),
         )
     return cfg
 

@@ -44,6 +44,7 @@ a notification, not an alert, and `xa doctor` will tell you if one creeps in.
   xa snooze <item> 2d   tell me again later
   xa mute <item>        false positive; never mention it again
   xa open <item>        hand it to an agent, with everything the check knows
+  xa run <job>          explicitly run configured scheduled maintenance
 
 {h_changing}
 
@@ -58,6 +59,7 @@ a notification, not an alert, and `xa doctor` will tell you if one creeps in.
   xa help snooze        the difference between ack, snooze and mute
   xa help actions       how an item becomes a working session
   xa help monitors      writing one
+  xa help jobs          scheduled maintenance without mutating monitors
   xa help thresholds    tuning what counts as urgent
   xa help autonomy      the ladder, and what is switched on
 """
@@ -183,6 +185,26 @@ Editing a monitor makes it due immediately, so a fix lands on the next tick
 rather than at the end of its interval.
 """
 
+JOBS = """
+{title}
+
+Monitors observe; jobs mutate. `xa collect --force` and `xa refresh` therefore
+never run a job. A job runs only when its own configured cadence is due or when
+you ask explicitly:
+
+  xa run <job>
+
+The daemon stores each structured job result. A cheap read-only monitor can
+turn failure or an overdue last success into an ordinary actionable xa item.
+Keeping the boundary explicit means editing a monitor cannot unexpectedly push
+data, while scheduled safe maintenance still uses xa's cadence and status UI.
+
+A job should be transactional up to its final irreversible operation: validate
+first, isolate temporary state, avoid force, and clean up after failure. Its
+config entry is explicit authorization for the daemon to perform that bounded
+operation on schedule.
+"""
+
 THRESHOLDS = """
 {title}
 
@@ -242,6 +264,8 @@ TOPICS = {
     "actions": ("Acting on an item", ACTIONS),
     "open": ("Acting on an item", ACTIONS),
     "monitors": ("Writing a monitor", MONITORS),
+    "jobs": ("Scheduled jobs", JOBS),
+    "run": ("Scheduled jobs", JOBS),
     "thresholds": ("Thresholds", THRESHOLDS),
     "autonomy": ("Autonomy", AUTONOMY),
     "mode": ("Autonomy", AUTONOMY),

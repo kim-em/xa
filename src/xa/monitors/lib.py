@@ -76,6 +76,13 @@ def opt(name: str, default: Any = None) -> Any:
         return raw
 
 
+def job_status(name: str) -> dict[str, Any] | None:
+    """Read the latest persisted result of a scheduled job."""
+    from xa.jobs import read_status
+
+    return read_status(name)
+
+
 def digest(*parts: Any) -> str:
     """A short, stable digest for use as a `state_key`."""
     material = "\x1f".join(str(p) for p in parts)

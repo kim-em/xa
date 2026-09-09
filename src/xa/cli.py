@@ -239,9 +239,42 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def cmd_run(args) -> int:
+    """Explicitly run a mutating job, then refresh its read-only health monitor."""
+    from .collect import collect, write_snapshot
+    from .jobs import JobBusy, run_job
+
+    cfg = config_mod.load()
+    try:
+        spec = cfg.job(args.job)
+    except KeyError as exc:
+        names = ", ".join(sorted(cfg.jobs)) or "none configured"
+        raise SystemExit(f"xa: {exc.args[0]} (jobs: {names})") from None
+    try:
+        status = run_job(spec, cfg)
+    except JobBusy as exc:
+        raise SystemExit(f"xa: {exc}") from None
+
+    if spec.monitor and spec.monitor in cfg.monitors:
+        snapshot = collect(cfg, _store(), only=[spec.monitor], force=True)
+        write_snapshot(snapshot, snapshot_path())
+    if args.json:
+        json.dump(status, sys.stdout, indent=1)
+        print()
+    else:
+        outcome = "completed" if status["ok"] else "failed"
+        print(f"{spec.name}: {outcome} — {status['summary']}")
+        for failure in (status.get("details") or {}).get("failures") or []:
+            print(
+                f"  {failure.get('host', '?')} {failure.get('store', '?')}: "
+                f"{failure.get('error', 'failed')}"
+            )
+    return 0 if status["ok"] else 1
+
+
 def cmd_open(args) -> int:
     """Escalate an item into a working session, seeded with what we already know."""
-    from .actions import ActionError, execute, plan, resolve
+    from .actions import ActionError, execute, plan, resolve, session_focus_launch
 
     snapshot = _load_snapshot()
     item = _find(snapshot, args.item)
@@ -381,6 +414,7 @@ def cmd_doctor(args) -> int:
     print(f"policy dir   {cfg.root}" + ("" if cfg.root.exists() else "   (missing)"))
     print(f"config.toml  {'present' if (cfg.root / 'config.toml').exists() else 'missing'}")
     print(f"monitors     {len(cfg.monitors)} configured")
+    print(f"jobs         {len(cfg.jobs)} configured")
     print(f"database     {db_path()}" + ("" if db_path().exists() else "   (not created yet)"))
     print(f"snapshot     {snap}" + ("" if snap.exists() else "   (not written yet)"))
     print(f"autonomy     {'enabled' if cfg.autonomy_enabled else 'disabled'}")
@@ -393,6 +427,14 @@ def cmd_doctor(args) -> int:
         print("\nmissing monitor executables:")
         for m in missing:
             print(f"  {m}")
+    missing_jobs = [
+        f"{n}: {s.exec}" for n, s in cfg.jobs.items()
+        if cfg.resolve(s.exec) is None or not cfg.resolve(s.exec).exists()
+    ]
+    if missing_jobs:
+        print("\nmissing job executables:")
+        for job in missing_jobs:
+            print(f"  {job}")
 
     # An item nobody can act on is a notification, not an alert, and a surface
     # full of them is one you stop reading. Faults and pending decisions must
@@ -471,6 +513,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="ignore each monitor's interval")
     s.add_argument("--quiet", action="store_true")
 
+    s = add("run", cmd_run, "run a configured mutating job now")
+    s.add_argument("job")
+
     s = add("open", cmd_open, "escalate an item into an agent session")
     s.add_argument("item")
     s.add_argument("action", nargs="?", help="which action, if the item offers several")
@@ -496,7 +541,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("help", cmd_help, "how xa works (not just what its flags are)")
     s.add_argument("topic", nargs="?",
-                   help="model, snooze, actions, monitors, thresholds, autonomy")
+                   help="model, snooze, actions, monitors, jobs, thresholds, autonomy")
 
     add("tui", cmd_tui, "interactive view: same verbs, one keystroke each")
     add("doctor", cmd_doctor, "check the installation")
