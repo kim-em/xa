@@ -134,6 +134,7 @@ src/xa/collect.py   running monitors, building the snapshot
 src/xa/render.py    terminal output (pure stdlib, so startup stays instant)
 src/xa/cli.py       the `xa` command
 src/xa/actions.py   prompt rendering and session launching
+src/xa/sessions.py  durable ai-tmux session creation and attachment
 src/xa/template.py  the small mustache subset prompts are written in
 src/xa/daemon.py    the collector loop
 src/xa/tui.py       the interactive view

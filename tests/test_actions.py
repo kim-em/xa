@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from xa.actions import (
-    ActionError, build_prompt, context_for, plan, resolve, session_focus_launch,
+    ActionError, build_prompt, context_for, plan, resolve,
 )
 from xa.config import Action, Config, MonitorSpec
 from xa.template import render
@@ -114,19 +114,6 @@ def test_a_reopen_does_not_seed_a_second_prompt(tmp_path):
     launch = plan(ITEM, _cfg(tmp_path).monitors["nt"].actions["fix"],
                   _cfg(tmp_path), ensure=False, resume=True)
     assert "WT_CLAUDE_PROMPT" not in launch.env
-
-
-def test_a_live_direct_session_reopens_via_its_terminal_pid(tmp_path, monkeypatch):
-    monkeypatch.setattr("xa.actions.sys.platform", "darwin")
-    cfg = _cfg(tmp_path, kind="session")
-    launch = plan(ITEM, cfg.monitors["nt"].actions["fix"], cfg, ensure=False)
-
-    focused = session_focus_launch(launch, "pid:1234")
-
-    assert focused.command == [
-        "open", "vscode://kim.ai-tmux-restore/focus?pid=1234"
-    ]
-    assert focused.command[0] != "claude"
 
 
 def test_a_fresh_worktree_session_gets_a_lifecycle_file(tmp_path):

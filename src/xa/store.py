@@ -126,6 +126,9 @@ CREATE TABLE IF NOT EXISTS work_sessions (
     status       TEXT NOT NULL,
     marker       TEXT NOT NULL DEFAULT '',
     session_name TEXT,
+    session_backend TEXT NOT NULL DEFAULT '',
+    session_cwd  TEXT NOT NULL DEFAULT '',
+    session_owner TEXT NOT NULL DEFAULT '',
     started_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (uid, state_key, action)
@@ -137,6 +140,9 @@ CREATE TABLE IF NOT EXISTS work_sessions (
 ADDED_COLUMNS = [
     ("latest_reports", "fingerprint", "TEXT NOT NULL DEFAULT ''"),
     ("plans", "from_agent", "INTEGER NOT NULL DEFAULT 1"),
+    ("work_sessions", "session_backend", "TEXT NOT NULL DEFAULT ''"),
+    ("work_sessions", "session_cwd", "TEXT NOT NULL DEFAULT ''"),
+    ("work_sessions", "session_owner", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -454,6 +460,8 @@ class Store:
             uid=row["uid"], state_key=row["state_key"], monitor=row["monitor"],
             action=row["action"], agent=row["agent"], status=row["status"],
             marker=row["marker"], session_name=row["session_name"],
+            session_backend=row["session_backend"], session_cwd=row["session_cwd"],
+            session_owner=row["session_owner"],
             started_at=parse_ts(row["started_at"]) or utcnow(),
             updated_at=parse_ts(row["updated_at"]) or utcnow(),
         )
@@ -461,20 +469,88 @@ class Store:
     @synchronised
     def start_work(self, uid: str, state_key: str, monitor: str, action: str,
                    agent: str, marker: str = "", session_name: str | None = None,
+                   session_backend: str = "", session_cwd: str = "",
+                   session_owner: str = "",
                    started_at: datetime | None = None) -> WorkSession:
         now = started_at or utcnow()
         self.db.execute(
             "INSERT INTO work_sessions"
-            " (uid,state_key,monitor,action,agent,status,marker,session_name,started_at,updated_at)"
-            " VALUES (?,?,?,?,?,'starting',?,?,?,?)"
+            " (uid,state_key,monitor,action,agent,status,marker,session_name,"
+            " session_backend,session_cwd,session_owner,started_at,updated_at)"
+            " VALUES (?,?,?,?,?,'starting',?,?,?,?,?,?,?)"
             " ON CONFLICT(uid,state_key,action) DO UPDATE SET"
             " monitor=excluded.monitor, action=excluded.action, agent=excluded.agent,"
             " status='starting', marker=excluded.marker, session_name=excluded.session_name,"
+            " session_backend=excluded.session_backend, session_cwd=excluded.session_cwd,"
+            " session_owner=excluded.session_owner,"
             " started_at=excluded.started_at, updated_at=excluded.updated_at",
             (uid, state_key, monitor, action, agent, marker, session_name,
+             session_backend, session_cwd, session_owner,
              now.isoformat(), now.isoformat()),
         )
         return self.work_for(uid, state_key, action)  # type: ignore[return-value]
+
+    @synchronised
+    def claim_work(self, uid: str, state_key: str, monitor: str, action: str,
+                   agent: str, session_backend: str = "",
+                   session_cwd: str = "", session_name: str | None = None,
+                   session_owner: str = "",
+                   ) -> WorkSession | None:
+        """Claim a fresh session without replacing work another process owns."""
+        now = utcnow().isoformat()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            live = self.db.execute(
+                "SELECT 1 FROM work_sessions WHERE uid=? AND action=?"
+                " AND status IN ('starting','active') LIMIT 1",
+                (uid, action),
+            ).fetchone()
+            if live is not None:
+                self.db.execute("COMMIT")
+                return None
+            self.db.execute(
+                "INSERT INTO work_sessions"
+                " (uid,state_key,monitor,action,agent,status,marker,session_name,"
+                " session_backend,session_cwd,session_owner,started_at,updated_at)"
+                " VALUES (?,?,?,?,?,'starting','',?,?,?,?,?,?)"
+                " ON CONFLICT(uid,state_key,action) DO UPDATE SET"
+                " monitor=excluded.monitor, agent=excluded.agent, status='starting',"
+                " marker='', session_name=NULL, session_backend=excluded.session_backend,"
+                " session_cwd=excluded.session_cwd, session_owner=excluded.session_owner,"
+                " started_at=excluded.started_at,"
+                " updated_at=excluded.updated_at",
+                (uid, state_key, monitor, action, agent, session_name,
+                 session_backend, session_cwd, session_owner, now, now),
+            )
+            row = self.db.execute(
+                "SELECT * FROM work_sessions WHERE uid=? AND state_key=? AND action=?",
+                (uid, state_key, action),
+            ).fetchone()
+            self.db.execute("COMMIT")
+            return self._work(row)
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    @synchronised
+    def retire_work_if_current(self, work: WorkSession,
+                               status: str = "finished") -> WorkSession | None:
+        """Retire a stale row only if no newer launcher has replaced it."""
+        current_name = work.session_name
+        condition = "session_name IS NULL" if current_name is None else "session_name=?"
+        params: tuple[Any, ...] = (status, utcnow().isoformat(), work.uid,
+                                   work.state_key, work.action)
+        if current_name is not None:
+            params += (current_name,)
+        cur = self.db.execute(
+            "UPDATE work_sessions SET status=?, updated_at=?"
+            " WHERE uid=? AND state_key=? AND action=?"
+            " AND status IN ('starting','active') AND " + condition,
+            params,
+        )
+        if not cur.rowcount:
+            return None
+        return self.work_for(work.uid, work.state_key, work.action)
 
     @synchronised
     def set_work_status(self, uid: str, state_key: str, action: str,
@@ -492,11 +568,15 @@ class Store:
 
     @synchronised
     def set_work_session_name(self, uid: str, state_key: str, action: str,
-                              session_name: str) -> WorkSession | None:
+                              session_name: str, session_backend: str = "",
+                              session_cwd: str = "",
+                              session_owner: str = "") -> WorkSession | None:
         self.db.execute(
-            "UPDATE work_sessions SET session_name=?, updated_at=?"
+            "UPDATE work_sessions SET session_name=?, session_backend=?, session_cwd=?,"
+            " session_owner=?, status='active', updated_at=?"
             " WHERE uid=? AND state_key=? AND action=?",
-            (session_name, utcnow().isoformat(), uid, state_key, action),
+            (session_name, session_backend, session_cwd, session_owner,
+             utcnow().isoformat(), uid, state_key, action),
         )
         return self.work_for(uid, state_key, action)
 

@@ -251,6 +251,21 @@ class WorkSession:
     session_name: str | None
     started_at: datetime
     updated_at: datetime
+    session_backend: str = ""
+    session_cwd: str = ""
+    session_owner: str = ""
+
+    @property
+    def session_registry(self) -> str:
+        """The folder the session is filed under, which is not where it runs.
+
+        ai-tmux keys its registry by the folder whose VS Code window reopens the
+        tab, so a session working in ~/metacortex from a window open on some
+        other repository is addressed by that window's folder. Rows written
+        before the two came apart carry only the working directory, which was
+        also the key, so falling back to it reads them correctly.
+        """
+        return self.session_owner or self.session_cwd
 
     def to_json(self) -> dict[str, Any]:
         return {

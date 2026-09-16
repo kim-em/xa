@@ -149,7 +149,7 @@ completed attempt remains visible on the unchanged item.
 {h_kinds}
 
   escalate   a worktree and a VS Code window on a branch or PR, via wt
-  session    an agent started in place, for work spanning many repositories
+  session    a durable ai-tmux agent attached in place, for multi-repo work
   run        a plain command
 
 {h_prompts}

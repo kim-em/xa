@@ -6,8 +6,10 @@ failure from a URL. The prompt is a markdown template in the policy directory,
 rendered at launch, so changing what a session is told needs no code change and
 no restart.
 
-Sessions are started through `~/bin/wt`, which already knows how to make a
-worktree, seed a prompt, choose between Claude and Codex, and open VS Code.
+Worktree escalations are started through `~/bin/wt`, which already knows how
+to make a worktree, seed a prompt, choose between Claude and Codex, and open VS
+Code. Direct multi-repository sessions are handed to the durable session
+backend by the CLI after their prompt and working directory are resolved here.
 """
 
 from __future__ import annotations
@@ -15,11 +17,9 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import sys
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import Action, Config
 from .model import StoredPlan, parse_ts, utcnow
@@ -144,16 +144,6 @@ class Launch:
         return f"cd {self.cwd} && " + (f"{env} {command}" if env else command)
 
 
-def session_focus_launch(launch: Launch, session_name: str | None) -> Launch:
-    """Replace a fresh session launch with a request to reveal its live terminal."""
-    if not session_name or not session_name.startswith("pid:"):
-        raise ActionError("the running session has no terminal process to focus")
-    pid = session_name.removeprefix("pid:")
-    uri = "vscode://kim.ai-tmux-restore/focus?" + urllib.parse.urlencode({"pid": pid})
-    command = ["open", uri] if sys.platform == "darwin" else ["code", uri]
-    return Launch(command, launch.cwd, {}, launch.prompt)
-
-
 def plan(item: dict[str, Any], action: Action, cfg: Config, agent: str | None = None,
          ensure: bool = True, investigation: "StoredPlan | None" = None,
          resume: bool = False, lifecycle: Path | None = None) -> Launch:
@@ -233,12 +223,10 @@ def ensure_checkout(cwd: Path, repo: str | None, action_id: str) -> None:
         raise ActionError(f"could not clone {repo} into {cwd}")
 
 
-def execute(launch: Launch, on_started: Callable[[int], None] | None = None) -> int:
+def execute(launch: Launch) -> int:
     env = dict(os.environ)
     env.update(launch.env)
     proc = subprocess.Popen(launch.command, cwd=str(launch.cwd), env=env)
-    if on_started is not None:
-        on_started(proc.pid)
     return proc.wait()
 
 

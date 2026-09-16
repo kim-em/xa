@@ -11,6 +11,7 @@ import json
 import socket
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +60,26 @@ def no_network(monkeypatch):
 
 def dispositions(uid: str = "m/k") -> list[str]:
     return [s.disposition for s in Store(cli.db_path()).suppressions() if s.uid == uid]
+
+
+def configure_session_action(home: Path) -> None:
+    (home / "policy" / "config.toml").write_text(
+        CONFIG
+        + f'''\n[[monitor.m.actions]]
+id = "fix"
+label = "Fix it"
+kind = "session"
+agent = "claude"
+cwd = {json.dumps(str(home))}
+prompt = "prompts/fix.md"
+'''
+    )
+    (home / "policy" / "prompts").mkdir(exist_ok=True)
+    (home / "policy" / "prompts" / "fix.md").write_text("Fix the thing")
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    snapshot["items"][0]["actions"] = ["fix"]
+    snapshot["items"][0]["action_labels"] = {"fix": "Fix it"}
+    cli.snapshot_path().write_text(json.dumps(snapshot))
 
 
 def test_acking_writes_to_the_database_and_touches_no_network(home, no_network):
@@ -215,3 +236,121 @@ def test_nothing_in_the_engine_imports_aiohttp():
         p.name for p in Path(xa.__file__).parent.glob("*.py") if "aiohttp" in p.read_text()
     ]
     assert offenders == []
+
+
+def test_doctor_checks_the_system_daemon_and_snapshot_freshness(
+    home, monkeypatch, capsys
+):
+    def run(command, **kwargs):
+        if command[:2] == ["launchctl", "print"] and command[2].startswith("system/"):
+            return SimpleNamespace(returncode=0, stdout="state = running\npid = 123\n")
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "running (system)" in out
+    assert "fresh (" in out
+
+
+def test_doctor_fails_for_a_dead_daemon_and_stale_snapshot(
+    home, monkeypatch, capsys
+):
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    snapshot["generated_at"] = "2020-01-01T00:00:00+00:00"
+    cli.snapshot_path().write_text(json.dumps(snapshot))
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="")
+    )
+
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "daemon       not running" in out
+    assert "stale (" in out
+
+
+def test_open_creates_and_records_a_durable_session(home, monkeypatch, capsys):
+    configure_session_action(home)
+    window = home / "the-window-i-typed-in"
+    window.mkdir()
+    monkeypatch.setenv("XA_SESSION_OWNER", str(window))
+    attached = []
+    created = []
+    monkeypatch.setattr("xa.sessions.new_name", lambda: "ai-claude-test-1")
+    monkeypatch.setattr(
+        "xa.sessions.create",
+        lambda *args, **kwargs: created.append((args, kwargs)) or "ai-claude-test-1",
+    )
+    monkeypatch.setattr(
+        "xa.sessions.attach", lambda name, cwd: attached.append((name, cwd)) or 0
+    )
+    monkeypatch.setattr("xa.sessions.is_registered", lambda name, cwd: True)
+
+    assert cli.main(["open", "m/k"]) == 0
+
+    # The fixture observation has a generated state key; find the row directly.
+    row = Store(cli.db_path()).execute(
+        "SELECT * FROM work_sessions WHERE uid='m/k' AND action='fix'"
+    ).fetchone()
+    assert row["status"] == "active"
+    assert row["session_backend"] == "ai-tmux"
+    assert row["session_name"] == "ai-claude-test-1"
+    # The agent works where the item says; the window that reopens its tab is
+    # the one the command was typed in, and it is the registry that is keyed by
+    # the second. Conflating them files the session where no window looks.
+    assert row["session_cwd"] == str(home)
+    assert row["session_owner"] == str(window)
+    assert created[0][0][2] == home
+    assert created[0][1]["owner"] == window
+    assert attached == [("ai-claude-test-1", window)]
+    assert "Fix it → claude" in capsys.readouterr().out
+
+
+def test_open_retires_a_dead_legacy_pid_and_starts_fresh(home, monkeypatch):
+    configure_session_action(home)
+    item = json.loads(cli.snapshot_path().read_text())["items"][0]
+    store = Store(cli.db_path())
+    store.start_work(
+        "m/k", item["state_key"], "m", "fix", "claude", session_name="pid:999"
+    )
+    store.set_work_status("m/k", item["state_key"], "fix", "active")
+    monkeypatch.setattr("xa.work.adopted_session_alive", lambda name: False)
+    monkeypatch.setattr("xa.sessions.new_name", lambda: "ai-claude-test-2")
+    monkeypatch.setattr("xa.sessions.create", lambda *args, **kwargs: "ai-claude-test-2")
+    monkeypatch.setattr("xa.sessions.attach", lambda name, cwd: 0)
+    monkeypatch.setattr("xa.sessions.is_registered", lambda name, cwd: True)
+
+    assert cli.main(["open", "m/k"]) == 0
+
+    work = Store(cli.db_path()).work_for("m/k", item["state_key"], "fix")
+    assert work.status == "active"
+    assert work.session_backend == "ai-tmux"
+    assert work.session_name == "ai-claude-test-2"
+
+
+def test_open_attaches_an_existing_durable_session_without_creating_one(
+    home, monkeypatch, capsys
+):
+    configure_session_action(home)
+    original_cwd = home / "original-workspace"
+    item = json.loads(cli.snapshot_path().read_text())["items"][0]
+    store = Store(cli.db_path())
+    store.start_work(
+        "m/k", item["state_key"], "m", "fix", "claude",
+        session_name="ai-claude-test-3", session_backend="ai-tmux",
+        session_cwd=str(original_cwd),
+    )
+    store.set_work_status("m/k", item["state_key"], "fix", "active")
+    monkeypatch.setattr("xa.sessions.is_registered", lambda name, cwd: True)
+    monkeypatch.setattr(
+        "xa.sessions.create", lambda *args, **kwargs: pytest.fail("created a rival session")
+    )
+    attached = []
+    monkeypatch.setattr(
+        "xa.sessions.attach", lambda name, cwd: attached.append((name, cwd)) or 0
+    )
+
+    assert cli.main(["open", "m/k"]) == 0
+    assert attached == [("ai-claude-test-3", original_cwd)]
+    assert "Reopening fix it" in capsys.readouterr().out

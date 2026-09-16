@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import timedelta
@@ -21,8 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from . import config as config_mod
-from .model import utcnow
-from .policy import parse_duration, parse_when
+from .model import parse_ts, utcnow
+from .policy import humanise, parse_duration, parse_when
 
 
 def snapshot_path() -> Path:
@@ -416,7 +417,11 @@ def cmd_refresh(args) -> int:
 
 def cmd_open(args) -> int:
     """Escalate an item into a working session, seeded with what we already know."""
-    from .actions import ActionError, execute, plan, resolve, session_focus_launch
+    from .actions import ActionError, execute, plan, resolve
+    from .sessions import SessionError, attach as attach_session
+    from .sessions import create as create_session
+    from .sessions import describe_new, is_registered, new_name, owner_folder
+    from .work import adopted_session_alive
 
     snapshot = _load_snapshot()
     item = _find(snapshot, args.item)
@@ -452,19 +457,132 @@ def cmd_open(args) -> int:
                       ensure=not inspecting,
                       investigation=investigation, resume=reopening,
                       lifecycle=marker if action.kind == "escalate" and not reopening else None)
-        if reopening and action.kind == "session":
-            launch = session_focus_launch(launch, previous.session_name)
+
+        if args.show_prompt:
+            print(launch.prompt)
+            return 0
+
+        if action.kind == "session" and reopening:
+            age = (utcnow() - previous.started_at).total_seconds()
+            if previous.session_backend == "ai-tmux" and previous.session_name:
+                try:
+                    registered = is_registered(
+                        previous.session_name, Path(previous.session_registry)
+                    )
+                except SessionError as exc:
+                    raise ActionError(f"could not verify the running session: {exc}") from exc
+                if not registered:
+                    if previous.status == "starting" and age < 60:
+                        raise ActionError("the session is still starting; try again shortly")
+                    if not inspecting:
+                        retired = store.retire_work_if_current(previous)
+                        previous = retired or store.work_for(
+                            previous.uid, previous.state_key, previous.action
+                        )
+                    reopening = False
+            elif not previous.session_name:
+                if age < 60:
+                    raise ActionError("the session is still starting; try again shortly")
+                if not inspecting:
+                    retired = store.retire_work_if_current(previous, "failed")
+                    previous = retired or store.work_for(
+                        previous.uid, previous.state_key, previous.action
+                    )
+                reopening = False
+            elif not adopted_session_alive(previous.session_name):
+                if not inspecting:
+                    retired = store.retire_work_if_current(previous)
+                    previous = retired or store.work_for(
+                        previous.uid, previous.state_key, previous.action
+                    )
+                reopening = False
+            else:
+                raise ActionError(
+                    "this legacy direct session is still running but cannot be reattached; "
+                    "wait for it to finish before starting a durable session"
+                )
     except ActionError as exc:
         raise SystemExit(f"xa: {exc}")
 
-    if args.show_prompt:
-        print(launch.prompt)
-        return 0
     if args.dry_run:
-        print(launch.describe())
+        if action.kind == "session":
+            if reopening and previous is not None:
+                print(
+                    f"cd {shlex.quote(previous.session_cwd)} && ai-tmux attach "
+                    f"{shlex.quote(previous.session_name or '')} --folder "
+                    f"{shlex.quote(previous.session_registry)}"
+                )
+            else:
+                try:
+                    print(describe_new(chosen_agent, launch.cwd,
+                                       owner=owner_folder()))
+                except SessionError as exc:
+                    raise SystemExit(f"xa: {exc}")
+        else:
+            print(launch.describe())
         print()
         print(launch.prompt)
         return 0
+
+    if action.kind == "session":
+        if reopening and previous is not None:
+            work = previous
+            session_cwd = Path(work.session_cwd)
+            registry = Path(work.session_registry)
+            _publish_work(snapshot, item["uid"], work)
+            print(f"Reopening {action.label.lower()} → {work.agent} in {session_cwd}")
+        else:
+            session_cwd = launch.cwd
+            # Where the agent works and which window reopens its tab are two
+            # different folders whenever the item's repository is not the one
+            # you are sitting in. ai-tmux keys the registry by the second.
+            registry = owner_folder()
+            name = new_name()
+            work = store.claim_work(
+                item["uid"], item["state_key"], item["monitor"], action.id,
+                chosen_agent, session_backend="ai-tmux", session_cwd=str(launch.cwd),
+                session_name=name, session_owner=str(registry),
+            )
+            if work is None:
+                raise SystemExit("xa: this session is already starting; try again shortly")
+            _publish_work(snapshot, item["uid"], work)
+            try:
+                create_session(
+                    chosen_agent, name, launch.cwd, launch.prompt,
+                    config_mod.state_dir(), owner=registry,
+                )
+            except SessionError as exc:
+                failed = store.set_work_status(
+                    item["uid"], item["state_key"], action.id, "failed"
+                )
+                if failed is not None:
+                    _publish_work(snapshot, item["uid"], failed)
+                raise SystemExit(f"xa: {exc}")
+            work = store.set_work_session_name(
+                item["uid"], item["state_key"], action.id, name,
+                session_backend="ai-tmux", session_cwd=str(launch.cwd),
+                session_owner=str(registry),
+            )
+            if work is None:
+                raise SystemExit("xa: the new session could not be recorded")
+            store.log_action(
+                item["uid"], action.id, chosen_agent, "manual",
+                detail=f"ai-tmux attach {name} --folder {registry}",
+            )
+            _publish_work(snapshot, item["uid"], work)
+            print(f"{action.label} → {chosen_agent} in {launch.cwd}")
+
+        try:
+            rc = attach_session(work.session_name or "", registry)
+            registered = is_registered(work.session_name or "", registry)
+        except SessionError as exc:
+            raise SystemExit(f"xa: {exc}")
+        if not registered:
+            _finalize_work(
+                work.uid, work.state_key, work.action, work.monitor,
+                work.session_name or "", "finished" if rc == 0 else "failed",
+            )
+        return rc
 
     if reopening:
         work = previous
@@ -501,25 +619,8 @@ def cmd_open(args) -> int:
     store.log_action(item["uid"], action.id, chosen_agent, "manual",
                      detail=" ".join(launch.command))
     print(f"{action.label} → {chosen_agent} in {launch.cwd}")
-    launched_session_name = ""
-
-    def record_session_pid(pid: int) -> None:
-        nonlocal launched_session_name
-        launched_session_name = f"pid:{pid}"
-        updated = store.set_work_session_name(
-            item["uid"], item["state_key"], action.id, launched_session_name
-        )
-        if updated is not None:
-            _publish_work(snapshot, item["uid"], updated)
-
-    tracked = action.kind != "escalate"
-    rc = execute(launch, on_started=record_session_pid if tracked else None)
-    if tracked:
-        _finalize_work(
-            item["uid"], item["state_key"], action.id, item["monitor"],
-            launched_session_name, "finished" if rc == 0 else "failed",
-        )
-    elif rc != 0:
+    rc = execute(launch)
+    if rc != 0:
         work = store.set_work_status(
             item["uid"], item["state_key"], action.id, "failed"
         )
@@ -668,13 +769,74 @@ def cmd_tui(args) -> int:
 def cmd_doctor(args) -> int:
     cfg = config_mod.load()
     snap = snapshot_path()
+    problems = 0
     print(f"policy dir   {cfg.root}" + ("" if cfg.root.exists() else "   (missing)"))
     print(f"config.toml  {'present' if (cfg.root / 'config.toml').exists() else 'missing'}")
     print(f"monitors     {len(cfg.monitors)} configured")
     print(f"jobs         {len(cfg.jobs)} configured")
     print(f"database     {db_path()}" + ("" if db_path().exists() else "   (not created yet)"))
-    print(f"snapshot     {snap}" + ("" if snap.exists() else "   (not written yet)"))
+    snapshot = _load_snapshot()
+    generated = parse_ts(snapshot.get("generated_at"))
+    snapshot_age = (utcnow() - generated).total_seconds() if generated else None
+    if snapshot_age is None:
+        snapshot_state = "not written yet"
+        problems += 1
+    elif snapshot_age > 600:
+        snapshot_state = f"stale ({humanise(snapshot_age)} old)"
+        problems += 1
+    else:
+        snapshot_state = f"fresh ({humanise(snapshot_age)} old)"
+    print(f"snapshot     {snap}   ({snapshot_state})")
     print(f"autonomy     {'enabled' if cfg.autonomy_enabled else 'disabled'}")
+
+    label = "com.kim.xa-daemon"
+    try:
+        service = subprocess.run(
+            ["launchctl", "print", f"system/{label}"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        service = None
+    service_running = (
+        service is not None
+        and service.returncode == 0
+        and "state = running" in service.stdout
+        and "pid = " in service.stdout
+    )
+    print(f"daemon       {'running (system)' if service_running else 'not running'}")
+    if not service_running:
+        problems += 1
+
+    try:
+        legacy = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except FileNotFoundError:
+        legacy = False
+    if legacy:
+        print("legacy agent present   (remove the GUI-domain collector)")
+        problems += 1
+
+    has_sessions = any(
+        action.kind == "session"
+        for spec in cfg.monitors.values()
+        for action in spec.actions.values()
+    )
+    if has_sessions:
+        from .sessions import SessionError, helper_path
+
+        try:
+            helper = helper_path()
+            helper_state = helper
+        except SessionError as exc:
+            helper_state = f"missing ({exc})"
+            problems += 1
+        print(f"session tool {helper_state}")
+        tmux = shutil.which("tmux")
+        print(f"tmux         {tmux or 'missing'}")
+        if tmux is None:
+            problems += 1
     missing = [
         f"{n}: {s.exec}"
         for n, s in cfg.monitors.items()
@@ -696,7 +858,6 @@ def cmd_doctor(args) -> int:
     # An item nobody can act on is a notification, not an alert, and a surface
     # full of them is one you stop reading. Faults and pending decisions must
     # always offer something; backlogs are metrics and may not.
-    snapshot = _load_snapshot()
     unactionable = [
         i for i in snapshot.get("items", [])
         if i.get("disposition", "active") == "active"
@@ -720,7 +881,7 @@ def cmd_doctor(args) -> int:
         print("\nitems offering actions that are not configured:")
         for uid, a in dangling:
             print(f"  {uid} -> {a}")
-    return 0
+    return 1 if problems else 0
 
 
 # ---------------------------------------------------------------------------

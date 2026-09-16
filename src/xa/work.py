@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from .model import Item, WorkSession, parse_ts, utcnow
+from .sessions import SessionError, session_names
 from .store import Store
 
 
@@ -20,6 +21,8 @@ def _stored_work(row) -> WorkSession | None:
         uid=row["uid"], state_key=row["state_key"], monitor=row["monitor"],
         action=row["action"], agent=row["agent"], status=row["status"],
         marker=row["marker"], session_name=row["session_name"],
+        session_backend=row["session_backend"], session_cwd=row["session_cwd"],
+        session_owner=row["session_owner"],
         started_at=parse_ts(row["started_at"]) or utcnow(),
         updated_at=parse_ts(row["updated_at"]) or utcnow(),
     )
@@ -87,7 +90,16 @@ def adopted_session_alive(session_name: str) -> bool:
 def reconcile(store: Store) -> list[WorkSession]:
     """Refresh live state and return sessions that have just finished."""
     finished: list[WorkSession] = []
+    registries: dict[str, set[str] | None] = {}
     for work in store.unfinished_work():
+        if (
+            work.status == "starting"
+            and not work.session_name
+            and not work.marker
+            and (utcnow() - work.started_at).total_seconds() >= 60
+        ):
+            store.retire_work_if_current(work, "failed")
+            continue
         state = marker_state(work)
         if state == "active" and work.status != "active":
             store.set_work_status(work.uid, work.state_key, work.action, "active")
@@ -98,6 +110,29 @@ def reconcile(store: Store) -> list[WorkSession]:
             )
             if done is not None:
                 finished.append(done)
+            continue
+
+        if work.session_backend == "ai-tmux" and work.session_name and work.session_cwd:
+            registry = work.session_registry
+            if registry not in registries:
+                try:
+                    registries[registry] = session_names(Path(registry))
+                except SessionError:
+                    # Unknown is not finished. Losing a resumable session is
+                    # worse than retaining a row until the helper recovers.
+                    registries[registry] = None
+            names = registries[registry]
+            if names is None:
+                continue
+            if work.session_name in names:
+                if work.status != "active":
+                    store.set_work_status(work.uid, work.state_key, work.action, "active")
+            elif work.status == "active":
+                done = store.set_work_status(
+                    work.uid, work.state_key, work.action, "finished"
+                )
+                if done is not None:
+                    finished.append(done)
             continue
 
         # A tmux name or direct-process PID is used for sessions adopted before

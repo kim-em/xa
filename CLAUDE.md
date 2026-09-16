@@ -72,11 +72,11 @@ second look into a confirmation pass.
 
 ## Sessions run where the daemon does
 
-`xa open` launches an agent on carica, in carica's tmux, and records it in
-`work_sessions` so a second `xa open` reveals that terminal instead of starting
-a rival session. The reveal is a `vscode://` URI, which fires on carica's
-desktop, where nobody is sitting. To actually get at a running session, attach
-to carica's tmux socket or open the directory over VSCode Remote.
+`xa open` launches an agent on carica through `ai-tmux` and records its stable
+session name and working directory in `work_sessions`. A second `xa open`
+attaches that session in the terminal where the command was run instead of
+starting a rival. The ai-tmux registry survives a reboot and resumes the exact
+Claude or Codex conversation when it is attached again.
 
 ## Reading the output honestly
 
@@ -96,8 +96,8 @@ five minutes rather than its full interval.
 `scripts/install.sh` is idempotent and installs the collector with `sudo`; run
 it on carica after changing a plist, and do not run it on persica, which is what
 removing the runtime from persica was for. The engine is pure stdlib apart from
-the optional TUI, and it should stay that way: a dependency on the read path is
-a dependency on a good day.
+the optional TUI; `ai-tmux` and tmux are required only on the action path for
+durable `session` actions.
 
 Tests run anywhere, and are the reason the checkout on persica is worth
 keeping. `.venv/bin/pytest` here, and `~/projects/xa/.venv/bin/pytest tests/`

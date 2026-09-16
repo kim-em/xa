@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import sqlite3
 from types import SimpleNamespace
 
 from xa import cli
@@ -150,3 +151,86 @@ def test_an_adopted_direct_process_is_recognised(monkeypatch):
 
     assert adopted_session_alive("pid:6200")
     assert seen == [(6200, 0)]
+
+
+def test_ai_tmux_registry_entry_survives_a_missing_tmux_server(tmp_path, monkeypatch):
+    store = Store(tmp_path / "xa.db")
+    store.start_work(
+        "m/k", "state", "m", "fix", "claude",
+        session_name="ai-claude-work-1", session_backend="ai-tmux",
+        session_cwd=str(tmp_path), started_at=NOW,
+    )
+    store.set_work_status("m/k", "state", "fix", "active")
+    monkeypatch.setattr("xa.work.session_names", lambda cwd: {"ai-claude-work-1"})
+
+    assert reconcile(store) == []
+    assert store.work_for("m/k", "state", "fix").status == "active"
+
+
+def test_ai_tmux_registry_removal_finishes_work(tmp_path, monkeypatch):
+    store = Store(tmp_path / "xa.db")
+    store.start_work(
+        "m/k", "state", "m", "fix", "claude",
+        session_name="ai-claude-work-1", session_backend="ai-tmux",
+        session_cwd=str(tmp_path), started_at=NOW,
+    )
+    store.set_work_status("m/k", "state", "fix", "active")
+    monkeypatch.setattr("xa.work.session_names", lambda cwd: set())
+
+    assert [work.uid for work in reconcile(store)] == ["m/k"]
+    assert store.work_for("m/k", "state", "fix").status == "finished"
+
+
+def test_ai_tmux_registry_error_never_retires_work(tmp_path, monkeypatch):
+    from xa.sessions import SessionError
+
+    store = Store(tmp_path / "xa.db")
+    store.start_work(
+        "m/k", "state", "m", "fix", "claude",
+        session_name="ai-claude-work-1", session_backend="ai-tmux",
+        session_cwd=str(tmp_path), started_at=NOW,
+    )
+    store.set_work_status("m/k", "state", "fix", "active")
+
+    def unavailable(cwd):
+        raise SessionError("registry unavailable")
+
+    monkeypatch.setattr("xa.work.session_names", unavailable)
+
+    assert reconcile(store) == []
+    assert store.work_for("m/k", "state", "fix").status == "active"
+
+
+def test_claim_work_does_not_replace_an_active_session(tmp_path):
+    store = Store(tmp_path / "xa.db")
+    first = store.claim_work(
+        "m/k", "state", "m", "fix", "claude",
+        session_backend="ai-tmux", session_cwd=str(tmp_path),
+    )
+
+    assert first is not None
+    assert store.claim_work("m/k", "state", "m", "fix", "claude") is None
+
+
+def test_existing_work_rows_gain_session_backend_columns(tmp_path):
+    path = tmp_path / "xa.db"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE work_sessions ("
+        "uid TEXT, state_key TEXT, monitor TEXT, action TEXT, agent TEXT,"
+        "status TEXT, marker TEXT, session_name TEXT, started_at TEXT, updated_at TEXT,"
+        "PRIMARY KEY(uid,state_key,action))"
+    )
+    db.execute(
+        "INSERT INTO work_sessions VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("m/k", "state", "m", "fix", "claude", "active", "", "pid:10",
+         NOW.isoformat(), NOW.isoformat()),
+    )
+    db.commit()
+    db.close()
+
+    work = Store(path).work_for("m/k", "state", "fix")
+
+    assert work.session_name == "pid:10"
+    assert work.session_backend == ""
+    assert work.session_cwd == ""
