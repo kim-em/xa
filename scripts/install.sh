@@ -41,8 +41,6 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/.venv/bin/xa" "$HOME/.local/bin/xa"
 
 echo "==> launchd"
-mkdir -p "$HOME/Library/LaunchAgents"
-
 # xa used to collect on one host and sync a snapshot to the others. It does not
 # any more. Remove the sync agent here rather than by hand: it has KeepAlive, so
 # a half-finished upgrade would leave it overwriting the snapshot this machine
@@ -54,11 +52,7 @@ if [ -f "$legacy" ]; then
     echo "    removed com.kim.xa-sync"
 fi
 
-label="com.kim.xa-daemon"
-cp "$ROOT/launchd/$label.plist" "$HOME/Library/LaunchAgents/$label.plist"
-launchctl unload "$HOME/Library/LaunchAgents/$label.plist" 2>/dev/null || true
-launchctl load "$HOME/Library/LaunchAgents/$label.plist"
-echo "    loaded $label"
+"$ROOT/scripts/install-launchd.sh"
 
 echo
 echo "Done. Try: xa doctor"

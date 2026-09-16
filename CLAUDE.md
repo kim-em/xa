@@ -2,7 +2,7 @@
 
 ## One machine collects, and it is carica
 
-The daemon runs on carica, under `com.kim.xa-daemon`, and writes
+The system LaunchDaemon runs on carica, under `com.kim.xa-daemon`, and writes
 `~/.cache/xa/snapshot.json` there, which `xa` reads. You reach both by ssh. The
 policy, meaning every monitor, threshold, prompt and action, lives in
 `~/metacortex/xa`, a separate git repository (`kim-em/metacortex`). Nothing in
@@ -35,7 +35,7 @@ persica changes nothing at all, however many times you re-read `xa`.
   immediately regardless of its interval. Commit and push it from
   `~/metacortex`, then `ssh carica 'cd ~/metacortex && git pull'`.
 - **`config.toml`** additionally needs
-  `ssh carica 'launchctl kickstart -k gui/$(id -u)/com.kim.xa-daemon'`. The
+  `ssh carica 'sudo launchctl kickstart -k system/com.kim.xa-daemon'`. The
   daemon calls `config.load()` once at startup, so edited thresholds, options,
   intervals, jobs and actions are invisible to it until it restarts. Thresholds
   set with `xa threshold` live in sqlite instead and apply at once.
@@ -87,17 +87,17 @@ per monitor, read `ok` and `collected_at` in `xa --json`, or force a full sweep
 with `xa collect --force`.
 
 Carica is a Mac Studio that stays awake, so the sleep gaps that came with
-collecting on a laptop are gone. A LaunchAgent still only runs in a logged-in
-GUI session, so a reboot that stops at the login window collects nothing. A
-monitor that fails is retried after five minutes rather than its full interval.
+collecting on a laptop are gone. The LaunchDaemon starts at boot and runs as
+`kim`, without depending on a GUI login. A monitor that fails is retried after
+five minutes rather than its full interval.
 
 ## Working here
 
-`scripts/install.sh` is idempotent and installs a collector; run it on carica
-after changing a plist, and do not run it on persica, which is what removing
-the runtime from persica was for. The engine is pure stdlib apart from the
-optional TUI, and it should stay that way: a dependency on the read path is a
-dependency on a good day.
+`scripts/install.sh` is idempotent and installs the collector with `sudo`; run
+it on carica after changing a plist, and do not run it on persica, which is what
+removing the runtime from persica was for. The engine is pure stdlib apart from
+the optional TUI, and it should stay that way: a dependency on the read path is
+a dependency on a good day.
 
 Tests run anywhere, and are the reason the checkout on persica is worth
 keeping. `.venv/bin/pytest` here, and `~/projects/xa/.venv/bin/pytest tests/`

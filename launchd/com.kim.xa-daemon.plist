@@ -7,8 +7,17 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/kim/projects/xa/.venv/bin/xa-daemon</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec /Users/kim/projects/xa/.venv/bin/xa-daemon</string>
     </array>
+
+    <key>UserName</key>
+    <string>kim</string>
+    <key>GroupName</key>
+    <string>staff</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/kim</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -16,7 +25,13 @@
              `investigate` or `auto` mode launches it. A launchd job inherits no
              login shell, so a missing entry here is stored as the plan. -->
         <key>PATH</key>
-        <string>/Users/kim/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/kim/bin:/Users/kim/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/kim</string>
+        <key>USER</key>
+        <string>kim</string>
+        <key>LOGNAME</key>
+        <string>kim</string>
         <key>XA_POLICY</key>
         <string>/Users/kim/metacortex/xa</string>
     </dict>
@@ -25,6 +40,8 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
 
     <key>StandardOutPath</key>
     <string>/Users/kim/.local/state/xa/daemon.log</string>

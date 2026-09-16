@@ -105,10 +105,10 @@ The contract:
 scripts/install.sh
 ```
 
-A launchd agent runs the collector. It works through the monitors on their own
-intervals, writes `snapshot.json`, and `xa` reads that file: asking never starts
-work, and the read path opens no socket. A test asserts exactly that, including
-for `xa ack`.
+A system launchd daemon runs the collector as the owning user, including before
+the GUI login. It works through the monitors on their own intervals, writes
+`snapshot.json`, and `xa` reads that file: asking never starts work, and the
+read path opens no socket. A test asserts exactly that, including for `xa ack`.
 
 One machine collects, and it is the machine you read on. A monitor that needs
 something from another host reaches it itself, over ssh, which keeps the
