@@ -60,10 +60,11 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_lookup ON history (monitor, key, ts);
 
--- When a given (monitor, key, state_key) was first observed. Monitors often
--- cannot know when a condition began: a disk fills gradually, a host stops
--- answering at no particular moment. Rather than have each invent a timestamp
--- or report none, the engine remembers when it first saw the situation.
+-- When the current continuous occurrence of a (monitor, key, state_key) was
+-- first observed. Monitors often cannot know when a condition began: a disk
+-- fills gradually, a host stops answering at no particular moment. Rather than
+-- have each invent a timestamp or report none, the engine remembers when it
+-- first saw the situation and removes the row after a successful clear.
 CREATE TABLE IF NOT EXISTS first_seen (
     monitor    TEXT NOT NULL,
     key        TEXT NOT NULL,
@@ -336,6 +337,31 @@ class Store:
             (monitor, key, state_key),
         ).fetchone()
         return parse_ts(row["first_seen"]) or now
+
+    @synchronised
+    def forget_inactive_first_seen(
+        self, monitor: str, active: Iterable[tuple[str, str]],
+    ) -> int:
+        """Forget states a successful report says are no longer present.
+
+        A state that returns after disappearing is a new occurrence, even when
+        its stable identity is unchanged. Keeping the old timestamp made a
+        momentary recurrence look weeks old and could promote it straight to
+        alert severity.
+        """
+        active = set(active)
+        rows = self.db.execute(
+            "SELECT key, state_key FROM first_seen WHERE monitor = ?", (monitor,)
+        ).fetchall()
+        stale = [
+            (monitor, row["key"], row["state_key"])
+            for row in rows
+            if (row["key"], row["state_key"]) not in active
+        ]
+        self.db.executemany(
+            "DELETE FROM first_seen WHERE monitor=? AND key=? AND state_key=?", stale
+        )
+        return len(stale)
 
     @synchronised
     def forget_first_seen(self, keep: timedelta = timedelta(days=180)) -> int:

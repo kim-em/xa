@@ -218,9 +218,18 @@ def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
     policies = effective_policies(cfg, store)
 
     # Fill in `since` for observations whose monitor could not supply one, using
-    # when we first saw this exact state. Ageing, thresholds and snooze lapse
-    # all depend on it, so an item without a start time is a second-class item.
+    # when we first saw this *continuous occurrence* of the exact state. A
+    # successful report is authoritative about what is present, so retire
+    # timestamps for states it no longer contains before recording this report.
+    # A failed report is blindness, not evidence that the old state cleared.
+    # Ageing, thresholds and snooze lapse all depend on this, so an item without
+    # a start time is a second-class item.
     for report in reports:
+        if report.ok:
+            store.forget_inactive_first_seen(
+                report.monitor,
+                ((obs.key, obs.state_key) for obs in report.observations),
+            )
         for obs in report.observations:
             first = store.note_first_seen(report.monitor, obs.key, obs.state_key, report.collected_at)
             if obs.since is None:

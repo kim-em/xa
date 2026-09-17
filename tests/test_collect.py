@@ -90,6 +90,43 @@ def test_first_seen_is_stable_across_collections(tmp_path):
     assert first == second
 
 
+def test_first_seen_resets_when_a_problem_clears_and_recurs(tmp_path):
+    """A stable state identifies the problem, not one endless occurrence of it."""
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    first_at = utcnow() - timedelta(minutes=3)
+    returned_at = utcnow()
+
+    def fault(at):
+        return MonitorReport(
+            monitor="m", collected_at=at,
+            observations=[Observation(key="k", title="t")],
+        )
+
+    first = collect(c, st, reports=[fault(first_at)]).items[0].obs.since
+    cleared = collect(c, st, reports=[MonitorReport(monitor="m")])
+    returned = collect(c, st, reports=[fault(returned_at)]).items[0].obs.since
+
+    assert first == first_at
+    assert cleared.items == []
+    assert returned == returned_at
+
+
+def test_a_failed_report_does_not_claim_a_problem_cleared(tmp_path):
+    """Losing sight of a monitor is not evidence that its fault ended."""
+    st, c = store(tmp_path), cfg(tmp_path, spec("m"))
+    first_at = utcnow() - timedelta(minutes=3)
+    fault = lambda at: MonitorReport(
+        monitor="m", collected_at=at,
+        observations=[Observation(key="k", title="t")],
+    )
+
+    collect(c, st, reports=[fault(first_at)])
+    collect(c, st, reports=[MonitorReport.crashed("m", "timed out")])
+    returned = collect(c, st, reports=[fault(utcnow())]).items[0].obs.since
+
+    assert returned == first_at
+
+
 def test_snapshot_round_trips_atomically(tmp_path):
     st, c = store(tmp_path), cfg(tmp_path, spec("m"))
     snapshot = collect(c, st, reports=[report()])
