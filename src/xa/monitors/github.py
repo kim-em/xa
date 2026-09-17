@@ -42,7 +42,7 @@ query($ids:[ID!]!) { nodes(ids:$ids) { ... on PullRequest { id mergeable } } }
 RESPONSE_ACTIVITY = """
 query($ids:[ID!]!) {
   nodes(ids:$ids) { ... on PullRequest {
-    id
+    id state
     commits(last:1) { nodes { commit { committedDate pushedDate } } }
     comments(last:50) { nodes { author { login __typename } createdAt body url } }
     reviews(last:50) { nodes { author { login __typename } submittedAt body url } }
@@ -192,7 +192,14 @@ def resolve_response_activity(prs: list[dict[str, Any]], actor: str, *,
                               ignore_authors: frozenset[str] = frozenset(),
                               ignore_body_prefixes: tuple[str, ...] = (),
                               batch: int = 20) -> None:
-    """Attach whether each PR has newer human feedback awaiting the actor."""
+    """Attach whether each PR has newer human feedback awaiting the actor.
+
+    The `is:open` in the search query is applied by GitHub's search index, which
+    lags state changes by minutes to tens of minutes; a pull request closed just
+    before a collection still comes back as a hit. These per-node reads are not
+    served from that index, so they are the cheap place to notice. A closed pull
+    request is recorded as such and never needs a response.
+    """
     by_id = {pr["id"]: pr for pr in prs}
     ids = list(by_id)
     for i in range(0, len(ids), batch):
@@ -202,6 +209,10 @@ def resolve_response_activity(prs: list[dict[str, Any]], actor: str, *,
         nodes = json.loads(_gh(args))["data"]["nodes"]
         for node in nodes or []:
             if node and node.get("id") in by_id:
+                if node.get("state") != "OPEN":
+                    by_id[node["id"]]["state"] = node.get("state")
+                    by_id[node["id"]]["response_needed"] = False
+                    continue
                 status = _response_status(
                     node,
                     actor,

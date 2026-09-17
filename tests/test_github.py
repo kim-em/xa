@@ -127,3 +127,36 @@ def test_repository_distribution_counts_only_the_given_slice():
     assert github._repo_distribution([prs[0], prs[2]]) == [
         {"repo": "org/conflicted", "count": 2},
     ]
+
+
+def test_closed_pull_request_from_a_stale_search_index_never_needs_a_response(monkeypatch):
+    # `is:open` is applied by GitHub's search index, which lags state changes, so a
+    # pull request closed minutes earlier still comes back as a hit. The per-node
+    # read is current, and is where that gets noticed.
+    pr = {**pr_with_activity(comments=[comment("reviewer", "2026-08-26T11:00:00Z")])}
+    node = {**pr, "state": "CLOSED"}
+    monkeypatch.setattr(
+        github, "_gh", lambda args, retries=4: __import__("json").dumps(
+            {"data": {"nodes": [node]}}
+        )
+    )
+
+    github.resolve_response_activity([pr], "kim-em")
+
+    assert pr["state"] == "CLOSED"
+    assert pr["response_needed"] is False
+
+
+def test_open_pull_request_still_reports_its_response_activity(monkeypatch):
+    pr = {**pr_with_activity(comments=[comment("reviewer", "2026-08-26T11:00:00Z")])}
+    node = {**pr, "state": "OPEN"}
+    monkeypatch.setattr(
+        github, "_gh", lambda args, retries=4: __import__("json").dumps(
+            {"data": {"nodes": [node]}}
+        )
+    )
+
+    github.resolve_response_activity([pr], "kim-em")
+
+    assert pr["response_needed"] is True
+    assert pr["response_activity"]["author"] == "reviewer"
