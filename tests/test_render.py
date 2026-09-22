@@ -184,3 +184,36 @@ def test_addressable_cluster_member_still_shows_its_evidence(monkeypatch):
 
     assert "  evidence" in output
     assert '"repo": "org/a"' in output
+
+
+def test_a_backlog_row_shows_its_links(monkeypatch):
+    """A slice small enough to read is better shown than sent to a session.
+
+    Backlog rows used to render their metrics and actions and drop `links` on
+    the floor, so a monitor with three pull requests to name had nowhere to
+    put them.
+    """
+    monkeypatch.setattr(render, "width", lambda: 100)
+    monkeypatch.setattr(render, "_COLOUR", False)
+    snapshot = {
+        "generated_at": datetime(2026, 9, 22, tzinfo=timezone.utc).isoformat(),
+        "count": 0,
+        "monitors": [],
+        "items": [{
+            "uid": "prs/mine", "monitor": "prs", "key": "mine", "kind": "backlog",
+            "title": "open pull requests I opened", "severity": "info",
+            "disposition": "active", "counts": False, "since": None,
+            "metrics": {"total": 2, "mine_to_merge": 2},
+            "links": [
+                {"label": "org/a#1", "url": "https://github.com/org/a/pull/1"},
+                {"label": "org/b#2", "url": "https://github.com/org/b/pull/2"},
+            ],
+            "actions": [], "action_labels": {},
+        }],
+    }
+
+    out = render.render(snapshot)
+
+    assert "org/a#1: https://github.com/org/a/pull/1" in out
+    assert "org/b#2: https://github.com/org/b/pull/2" in out
+    assert "2 mine to merge" in out

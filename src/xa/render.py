@@ -87,6 +87,25 @@ def _link_lines(item: dict[str, Any]) -> list[str]:
     ]
 
 
+def _summary_row(item: dict[str, Any], name_w: int) -> list[str]:
+    """A backlog or status row: a headline number and what to do about it.
+
+    These carry no age, because a backlog is a level rather than an event.
+    They do carry links, for the case where a slice has shrunk to something a
+    person can just read: three pull requests to merge are better shown than
+    handed to a session that would list them and stop.
+    """
+    content_col = name_w + 6
+    lines = [f"    {item['uid'][:name_w]:<{name_w}}  {item['title']}"]
+    if item.get("metrics"):
+        lines.append(" " * content_col + _metrics_line(item["metrics"]))
+    for link in _link_lines(item):
+        lines.append(" " * content_col + paint("↗ ", "36") + link)
+    for action in _action_lines(item):
+        lines.append(" " * content_col + paint("→ ", "32") + action)
+    return lines
+
+
 def _row(item: dict[str, Any], now: datetime, name_w: int) -> list[str]:
     sev = item["severity"]
     glyph = paint(GLYPH.get(sev, "·"), COLOUR.get(sev, "0"))
@@ -239,25 +258,13 @@ def render(snapshot: dict[str, Any], show_all: bool = False) -> str:
         out.append("")
         out.append(paint("BACKLOG", "1"))
         for i in backlog:
-            content_col = name_w + 6
-            line = f"    {i['uid'][:name_w]:<{name_w}}  {i['title']}"
-            out.append(line)
-            if i.get("metrics"):
-                out.append(" " * content_col + _metrics_line(i["metrics"]))
-            for action in _action_lines(i):
-                out.append(" " * content_col + paint("→ ", "32") + action)
+            out.extend(_summary_row(i, name_w))
 
     if status:
         out.append("")
         out.append(paint("STATUS", "1"))
         for i in status:
-            content_col = name_w + 6
-            line = f"    {i['uid'][:name_w]:<{name_w}}  {i['title']}"
-            out.append(line)
-            if i.get("metrics"):
-                out.append(" " * content_col + _metrics_line(i["metrics"]))
-            for action in _action_lines(i):
-                out.append(" " * content_col + paint("→ ", "32") + action)
+            out.extend(_summary_row(i, name_w))
 
     healthy = [
         m["name"]
