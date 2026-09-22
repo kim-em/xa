@@ -27,7 +27,7 @@ query($q:String!, $after:String) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       id number title url isDraft createdAt updatedAt mergeable reviewDecision
-      repository { nameWithOwner }
+      repository { nameWithOwner viewerPermission }
       author { login }
       labels(first:30) { nodes { name } }
       commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
@@ -165,6 +165,16 @@ def _is_bot(author: dict[str, Any] | None) -> bool:
         return True
     login = str(author.get("login") or "")
     return author.get("__typename") == "Bot" or login.endswith("[bot]")
+
+
+def viewer_permission(pr: dict[str, Any]) -> str:
+    """What the authenticated user may do in the pull request's repository.
+
+    One of ADMIN, MAINTAIN, WRITE, TRIAGE, READ, or an empty string when the
+    field was not asked for. Approving a pull request and being able to merge
+    it are different things, and only this says which.
+    """
+    return str((pr.get("repository") or {}).get("viewerPermission") or "")
 
 
 def label_names(pr: dict[str, Any]) -> frozenset[str]:
