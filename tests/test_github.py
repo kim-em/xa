@@ -168,6 +168,16 @@ def test_a_pending_review_is_not_yet_addressed_to_anyone():
     assert github._response_status(pr, "kim-em") is None
 
 
+def test_viewer_permission_distinguishes_approving_from_merging():
+    # A pull request can be approved by two people in a repository where I have
+    # read access, which approves it and does not let me land it.
+    assert github.viewer_permission(
+        {"repository": {"nameWithOwner": "org/x", "viewerPermission": "READ"}}
+    ) == "READ"
+    assert github.viewer_permission({"repository": {"nameWithOwner": "org/x"}}) == ""
+    assert github.viewer_permission({}) == ""
+
+
 def test_labels_read_from_either_query_shape():
     assert github.label_names(pr_with_activity(labels=["awaiting-author"])) == {
         "awaiting-author",
