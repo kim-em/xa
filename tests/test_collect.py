@@ -11,6 +11,7 @@ from xa.collect import (
     _muted_observation_keys,
     collect,
     due,
+    offered,
     read_snapshot,
     write_snapshot,
 )
@@ -321,3 +322,35 @@ def test_both_builders_agree(tmp_path):
     final = collect(c, st)
     assert [(i.uid, i.severity, i.plan) for i in mid_sweep.items] == \
            [(i.uid, i.severity, i.plan) for i in final.items]
+
+
+def test_an_action_is_offered_only_while_its_slice_has_something_in_it():
+    # A backlog row's counts move. Offering to triage the failing CI when
+    # nothing is failing teaches you to stop reading the suggestions.
+    m = spec("prs", actions={
+        "red": Action(id="red", label="Triage the failing CI", when="red"),
+        "conflicts": Action(id="conflicts", label="Triage the conflicts", when="conflicts"),
+        "triage": Action(id="triage", label="Rank the queue"),
+    })
+    obs = Observation(
+        key="mine", title="t", kind="backlog",
+        evidence={"conflicts": [{"number": 1}]},
+        actions=["red", "conflicts", "triage"],
+    )
+
+    # `red` has no evidence; `triage` names no slice and is always available.
+    assert offered(obs, m) == ["conflicts", "triage"]
+
+
+def test_an_empty_slice_is_the_same_as_a_missing_one():
+    m = spec("prs", actions={"red": Action(id="red", label="l", when="red")})
+    obs = Observation(key="mine", title="t", evidence={"red": []}, actions=["red"])
+
+    assert offered(obs, m) == []
+
+
+def test_an_action_the_monitor_names_but_policy_does_not_configure_is_dropped():
+    m = spec("prs", actions={})
+    obs = Observation(key="mine", title="t", actions=["red"])
+
+    assert offered(obs, m) == []
