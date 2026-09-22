@@ -200,7 +200,7 @@ def test_response_candidates_omit_only_configured_repositories():
         {"repository": {"nameWithOwner": "leanprover-community/mathlib4"}},
     ]
 
-    candidates = github._response_candidates(
+    candidates = github.response_candidates(
         prs,
         frozenset({"taucetiproject/tauceti/", "KIM-EM/HEX-DEV"}),
     )
@@ -215,7 +215,7 @@ def test_repository_distribution_counts_only_the_given_slice():
         {"repository": {"nameWithOwner": "org/conflicted"}},
     ]
 
-    assert github._repo_distribution([prs[0], prs[2]]) == [
+    assert github.repo_distribution([prs[0], prs[2]]) == [
         {"repo": "org/conflicted", "count": 2},
     ]
 

@@ -59,6 +59,23 @@ def test_inverted_section_fires_on_empty():
     assert render("{{^missing}}none{{/missing}}", {"missing": []}) == "none"
 
 
+def test_scalar_section_exposes_its_own_value():
+    # `{{#count}}Plus {{.}} more{{/count}}` is the natural reading of a section
+    # opened on a number, and the only safe one: rendering the body against the
+    # unchanged stack left `{{.}}` meaning the root context, so a truncation
+    # count rendered as the whole item.
+    assert render("{{#n}}Plus {{.}} more{{/n}}", {"n": 27}) == "Plus 27 more"
+    assert render("{{#n}}Plus {{.}} more{{/n}}", {"n": 0}) == ""
+
+
+def test_a_dict_or_list_never_renders_as_its_python_repr():
+    # Prompts are handed to agents. A mistyped tag must produce nothing, not a
+    # dump of whatever is in scope.
+    assert render("[{{evidence}}]", ITEM) == "[]"
+    assert render("[{{evidence.modules}}]", ITEM) == "[]"
+    assert render("{{#evidence.diagnostics}}[{{context}}]{{/evidence.diagnostics}}", ITEM) == "[][]"
+
+
 def test_standalone_tags_do_not_leave_blank_lines():
     out = render("a\n{{#evidence.modules}}\nx\n{{/evidence.modules}}\nb", ITEM)
     assert out == "a\nx\nx\nb"

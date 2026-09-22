@@ -152,7 +152,7 @@ def resolve_mergeable(prs: list[dict[str, Any]], batch: int = 80, waits=(3, 8)) 
                     by_id[node["id"]]["mergeable"] = node.get("mergeable", "UNKNOWN")
 
 
-def _ci(pr: dict[str, Any]) -> str | None:
+def ci_state(pr: dict[str, Any]) -> str | None:
     nodes = (pr.get("commits") or {}).get("nodes") or []
     if not nodes:
         return None
@@ -409,7 +409,7 @@ def _needs_response(pr: dict[str, Any]) -> bool:
     return bool(pr.get("response_needed"))
 
 
-def _repo_distribution(prs: list[dict[str, Any]], limit: int = 15) -> list[dict[str, Any]]:
+def repo_distribution(prs: list[dict[str, Any]], limit: int = 15) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     for pr in prs:
         repo = pr["repository"]["nameWithOwner"]
@@ -422,7 +422,7 @@ def _repo_distribution(prs: list[dict[str, Any]], limit: int = 15) -> list[dict[
     ]
 
 
-def _response_candidates(
+def response_candidates(
     prs: list[dict[str, Any]], ignored_repositories: frozenset[str]
 ) -> list[dict[str, Any]]:
     """PRs whose discussion activity should be checked for a response."""
@@ -445,13 +445,13 @@ def metrics_for(prs: list[dict[str, Any]], now) -> dict[str, int]:
         updated = parse_ts(pr.get("updatedAt"))
         return updated is not None and updated < stale_cutoff
 
-    green = [p for p in prs if _ci(p) == "SUCCESS" and not p["isDraft"]]
+    green = [p for p in prs if ci_state(p) == "SUCCESS" and not p["isDraft"]]
     return {
         "total": len(prs),
         "draft": sum(1 for p in prs if p["isDraft"]),
         "green": len(green),
-        "red": sum(1 for p in prs if _ci(p) == "FAILURE"),
-        "pending_ci": sum(1 for p in prs if _ci(p) == "PENDING"),
+        "red": sum(1 for p in prs if ci_state(p) == "FAILURE"),
+        "pending_ci": sum(1 for p in prs if ci_state(p) == "PENDING"),
         "conflicts": sum(1 for p in prs if p.get("mergeable") == "CONFLICTING"),
         "changes_requested": sum(1 for p in prs if _needs_response(p)),
         "approved": sum(1 for p in prs if p.get("reviewDecision") == "APPROVED"),
@@ -461,7 +461,7 @@ def metrics_for(prs: list[dict[str, Any]], now) -> dict[str, int]:
             for p in prs
             if p.get("reviewDecision") == "APPROVED"
             and p.get("mergeable") == "MERGEABLE"
-            and _ci(p) == "SUCCESS"
+            and ci_state(p) == "SUCCESS"
             and not p["isDraft"]
         ),
     }
@@ -470,12 +470,12 @@ def metrics_for(prs: list[dict[str, Any]], now) -> dict[str, int]:
 # Slices worth naming, mapping a metric to the PRs behind it.
 SLICES = {
     "conflicts": lambda p: p.get("mergeable") == "CONFLICTING",
-    "red": lambda p: _ci(p) == "FAILURE",
+    "red": lambda p: ci_state(p) == "FAILURE",
     "changes_requested": _needs_response,
     "ready": lambda p: (
         p.get("reviewDecision") == "APPROVED"
         and p.get("mergeable") == "MERGEABLE"
-        and _ci(p) == "SUCCESS"
+        and ci_state(p) == "SUCCESS"
         and not p["isDraft"]
     ),
 }
@@ -496,7 +496,7 @@ def run_github_search(spec: MonitorSpec, cfg: Config) -> MonitorReport:
             raise ValueError(
                 f"monitor {spec.name!r} surfaces changes_requested but has no response_actor"
             )
-        response_prs = _response_candidates(
+        response_prs = response_candidates(
             prs,
             frozenset(
                 str(value)
@@ -562,7 +562,7 @@ def run_github_search(spec: MonitorSpec, cfg: Config) -> MonitorReport:
                 }
                 for p in picked
             ]
-            evidence[f"{name}_by_repo"] = _repo_distribution(matching)
+            evidence[f"{name}_by_repo"] = repo_distribution(matching)
 
     report.observations.append(
         Observation(
