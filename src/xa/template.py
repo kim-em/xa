@@ -87,14 +87,22 @@ def render(template: str, context: dict[str, Any], _pre: bool = True) -> str:
                 if value:
                     out.append(render_frame(body, stack + [value], context))
             elif _truthy(value):
-                out.append(render_frame(body, stack, context))
+                # Push the scalar, so `{{.}}` in the body means the value that
+                # opened the section. Rendering the body against the unchanged
+                # stack instead left `{{.}}` resolving to the root context, and
+                # a count rendered as the entire item: 44KB of engine state,
+                # `plan` included, pasted into an agent's prompt.
+                out.append(render_frame(body, stack + [value], context))
             continue
 
         if sigil == "/":
             continue  # unbalanced close; ignore rather than fail a prompt
 
         value = lookup(stack, name)
-        out.append("" if value is None else str(value))
+        # A dict has no useful string form, and the one Python gives is a dump
+        # of whatever happens to be in scope. Prompts are handed to agents, so
+        # the safe reading of a mistake here is nothing at all.
+        out.append("" if value is None or isinstance(value, (dict, list)) else str(value))
 
     return "".join(out)
 

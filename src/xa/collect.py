@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from .config import Config, MonitorSpec
-from .model import Item, MonitorReport, utcnow
+from .model import Item, MonitorReport, Observation, utcnow
 from .policy import MonitorPolicy, Suppression, Thresholds, build_items, parse_duration, sort_key
 from .store import Store
 
@@ -47,6 +47,27 @@ class Snapshot:
             "suppressions": self.suppressions,
             "items": [i.to_json() for i in self.items],
         }
+
+
+def offered(obs: Observation, spec: MonitorSpec) -> list[str]:
+    """The observation's actions, minus any whose slice is currently empty.
+
+    A backlog row names several slices and carries an action for each, and the
+    counts move: a monitor reporting no failing CI went on offering to triage
+    the failing CI for as long as it existed, which teaches you to stop reading
+    the suggestions. An action declaring `when = "<evidence key>"` is offered
+    only while there is something behind it. Asking for it by name still works,
+    so the escape hatch survives.
+    """
+    out = []
+    for action_id in obs.actions:
+        action = spec.actions.get(action_id)
+        if action is None:
+            continue
+        if action.when and not (obs.evidence or {}).get(action.when):
+            continue
+        out.append(action_id)
+    return out
 
 
 def _suppressions_payload(store: Store) -> list[dict[str, Any]]:
@@ -247,10 +268,10 @@ def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
             continue
         spec = cfg.monitors.get(item.monitor)
         if spec is not None:
+            item.obs.actions = offered(item.obs, spec)
             item.action_labels = {
                 action_id: spec.actions[action_id].label
                 for action_id in item.obs.actions
-                if action_id in spec.actions
             }
 
     # Attach any plan already produced for each item's current state. Doing this

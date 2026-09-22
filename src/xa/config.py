@@ -66,6 +66,10 @@ class Action:
     # `escalate` opens an interactive session; `run` executes a command directly.
     kind: str = "escalate"
     command: list[str] = field(default_factory=list)
+    # An evidence key this action works on. Named, the action is offered only
+    # while that evidence is non-empty, because an action that triages a slice
+    # of nothing is a suggestion to go and do nothing.
+    when: str | None = None
 
     @classmethod
     def from_config(cls, raw: dict[str, Any]) -> "Action":
@@ -80,6 +84,7 @@ class Action:
             name=raw.get("name"),
             kind=str(raw.get("kind", "escalate")),
             command=list(raw.get("command") or []),
+            when=raw.get("when"),
         )
 
 
