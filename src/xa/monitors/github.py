@@ -29,6 +29,7 @@ query($q:String!, $after:String) {
       id number title url isDraft createdAt updatedAt mergeable reviewDecision
       repository { nameWithOwner }
       author { login }
+      labels(first:30) { nodes { name } }
       commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
     } }
   }
@@ -39,15 +40,51 @@ MERGEABLE_RECHECK = """
 query($ids:[ID!]!) { nodes(ids:$ids) { ... on PullRequest { id mergeable } } }
 """
 
-RESPONSE_ACTIVITY = """
+# One request per batch for everything that needs a per-node read: current
+# state, labels, and the timing of every human event.
+#
+# The shape matters more than the field list. GitHub's GraphQL budget charges
+# for a connection nested inside a connection, and almost nothing else: the
+# `reviewThreads { comments }` this replaced cost 0.55 points per pull request,
+# where this costs 0.025, measured against the 5000/hour limit. The `last:`
+# argument makes no difference to the price at all, so there is no reason to
+# economise on the window.
+#
+# The price is paid in inline review-comment text, which lives only under that
+# nested connection. A review with inline comments and no body still arrives as
+# a PULL_REQUEST_REVIEW event, so who engaged and when both survive; only the
+# quotable excerpt is missing, and `resolve_review_comment_bodies` fetches that
+# for the handful of pull requests where it is actually going to be read.
+TIMELINE = """
 query($ids:[ID!]!) {
   nodes(ids:$ids) { ... on PullRequest {
-    id state
-    commits(last:1) { nodes { commit { committedDate pushedDate } } }
-    comments(last:50) { nodes { author { login __typename } createdAt body url } }
-    reviews(last:50) { nodes { author { login __typename } submittedAt body url } }
-    reviewThreads(last:50) { nodes {
-      comments(last:50) { nodes { author { login __typename } createdAt body url } }
+    id state isDraft mergeable reviewDecision updatedAt
+    labels(first:30) { nodes { name } }
+    commits(last:1) { nodes { commit {
+      committedDate pushedDate statusCheckRollup { state }
+    } } }
+    timelineItems(
+      last:100,
+      itemTypes:[ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT, LABELED_EVENT]
+    ) { nodes {
+      __typename
+      ... on IssueComment { createdAt url body author { login __typename } }
+      ... on PullRequestReview { createdAt url body state author { login __typename } }
+      ... on PullRequestCommit { commit { committedDate pushedDate } }
+      ... on LabeledEvent { createdAt label { name } }
+    } }
+  } }
+}
+"""
+
+# Inline review-comment bodies, for the few pull requests whose latest human
+# event turns out to have been an inline comment with no review body.
+REVIEW_COMMENT_BODIES = """
+query($ids:[ID!]!) {
+  nodes(ids:$ids) { ... on PullRequest {
+    id
+    reviewThreads(last:20) { nodes {
+      comments(first:5) { nodes { author { login __typename } createdAt body url } }
     } }
   } }
 }
@@ -130,48 +167,105 @@ def _is_bot(author: dict[str, Any] | None) -> bool:
     return author.get("__typename") == "Bot" or login.endswith("[bot]")
 
 
-def _response_status(pr: dict[str, Any], actor: str, *,
-                     ignore_authors: frozenset[str] = frozenset(),
-                     ignore_body_prefixes: tuple[str, ...] = ()) -> dict[str, Any] | None:
-    """Latest human comment after the author's latest comment or head commit.
+def label_names(pr: dict[str, Any]) -> frozenset[str]:
+    """The labels currently on a pull request, from either query shape."""
+    return frozenset(
+        str(node["name"])
+        for node in (pr.get("labels") or {}).get("nodes") or []
+        if node and node.get("name")
+    )
 
-    GitHub does not reliably expose the time an ordinary commit was pushed to a
-    PR branch. `pushedDate` is used when available, with `committedDate` as the
-    closest stable proxy. Issue comments, review bodies, and inline review
-    comments all count; empty reviews and bot noise do not.
+
+def _timeline_events(node: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """Human events on a pull request, and the actor-neutral latest push time.
+
+    A review is an event whether or not it has a body. The old shape read
+    review bodies and inline comments separately and skipped bodiless reviews,
+    which meant a reviewer who left only inline notes registered through their
+    comments; here the review itself carries the timing, so an inline-only
+    review still counts and no nested connection has to be paid for.
+
+    GitHub does not reliably expose when a commit was pushed to a branch.
+    `pushedDate` is used where present, with `committedDate` as the closest
+    stable proxy.
     """
     events: list[dict[str, Any]] = []
-    for node in (pr.get("comments") or {}).get("nodes") or []:
-        if node.get("body"):
-            events.append({**node, "at": node.get("createdAt"), "kind": "comment"})
-    for node in (pr.get("reviews") or {}).get("nodes") or []:
-        if str(node.get("body") or "").strip():
-            events.append({**node, "at": node.get("submittedAt"), "kind": "review"})
-    for thread in (pr.get("reviewThreads") or {}).get("nodes") or []:
-        for node in (thread.get("comments") or {}).get("nodes") or []:
-            if node.get("body"):
-                events.append({**node, "at": node.get("createdAt"), "kind": "review comment"})
+    pushes: list[str] = []
+    for item in (node.get("timelineItems") or {}).get("nodes") or []:
+        kind = item.get("__typename")
+        if kind == "IssueComment":
+            events.append({
+                "at": item.get("createdAt"), "author": item.get("author"),
+                "body": item.get("body") or "", "url": item.get("url"),
+                "kind": "comment",
+            })
+        elif kind == "PullRequestReview":
+            # A review still being drafted is not yet addressed to anyone, and
+            # one that was dismissed has been retracted.
+            if item.get("state") in ("PENDING", "DISMISSED"):
+                continue
+            events.append({
+                "at": item.get("createdAt"), "author": item.get("author"),
+                "body": item.get("body") or "", "url": item.get("url"),
+                "kind": "review", "state": item.get("state"),
+            })
+        elif kind == "PullRequestCommit":
+            commit = item.get("commit") or {}
+            at = commit.get("pushedDate") or commit.get("committedDate")
+            if at:
+                pushes.append(at)
 
-    commits = (pr.get("commits") or {}).get("nodes") or []
-    commit = commits[-1].get("commit") if commits else None
-    own_times = [
-        at
-        for at in [
-            (commit or {}).get("pushedDate") or (commit or {}).get("committedDate"),
-            *(event.get("at") for event in events
-              if (event.get("author") or {}).get("login") == actor),
-        ]
-        if at
-    ]
-    latest_own = max(own_times, default="")
-    external = [
+    head = ((node.get("commits") or {}).get("nodes") or [{}])[-1].get("commit") or {}
+    at = head.get("pushedDate") or head.get("committedDate")
+    if at:
+        pushes.append(at)
+    return [event for event in events if event.get("at")], max(pushes, default="")
+
+
+def _external(events: list[dict[str, Any]], actor: str, *,
+              ignore_authors: frozenset[str],
+              ignore_body_prefixes: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Events from a human who is neither the actor nor ignored by policy."""
+    return [
         event
         for event in events
         if not _is_bot(event.get("author"))
         and (event.get("author") or {}).get("login") != actor
         and (event.get("author") or {}).get("login") not in ignore_authors
         and not str(event.get("body") or "").lstrip().startswith(ignore_body_prefixes)
-        and event.get("at")
+    ]
+
+
+def _is_feedback(event: dict[str, Any]) -> bool:
+    """Whether an event asks the author for anything.
+
+    A bare approval with no body is a green light, not a question: it is
+    reported by the `approved` and `ready` metrics, and treating it as feedback
+    would leave every approved pull request permanently owing a reply. An
+    approval whose author took the trouble to write something is feedback, and
+    so is a bodiless review at any other state, because the empty body means
+    the notes were left inline.
+    """
+    return not (
+        event.get("kind") == "review"
+        and event.get("state") == "APPROVED"
+        and not str(event.get("body") or "").strip()
+    )
+
+
+def _response_status(pr: dict[str, Any], actor: str, *,
+                     ignore_authors: frozenset[str] = frozenset(),
+                     ignore_body_prefixes: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """Latest human event after the actor's own latest comment or push."""
+    events, latest_push = _timeline_events(pr)
+    own = [event["at"] for event in events
+           if (event.get("author") or {}).get("login") == actor]
+    latest_own = max([latest_push, *own], default="")
+    external = [
+        event
+        for event in _external(events, actor, ignore_authors=ignore_authors,
+                               ignore_body_prefixes=ignore_body_prefixes)
+        if _is_feedback(event)
     ]
     if not external:
         return None
@@ -188,39 +282,127 @@ def _response_status(pr: dict[str, Any], actor: str, *,
     }
 
 
-def resolve_response_activity(prs: list[dict[str, Any]], actor: str, *,
-                              ignore_authors: frozenset[str] = frozenset(),
-                              ignore_body_prefixes: tuple[str, ...] = (),
-                              batch: int = 20) -> None:
-    """Attach whether each PR has newer human feedback awaiting the actor.
+def resolve_timeline(prs: list[dict[str, Any]], actor: str, *,
+                     ignore_authors: frozenset[str] = frozenset(),
+                     ignore_body_prefixes: tuple[str, ...] = (),
+                     batch: int = 40) -> None:
+    """Attach current state, labels, and human-engagement timing to each PR.
 
-    The `is:open` in the search query is applied by GitHub's search index, which
+    The `is:open` in a search query is applied by GitHub's search index, which
     lags state changes by minutes to tens of minutes; a pull request closed just
     before a collection still comes back as a hit. These per-node reads are not
     served from that index, so they are the cheap place to notice. A closed pull
     request is recorded as such and never needs a response.
+
+    Two things are attached that a search cannot answer. `response_activity` is
+    feedback awaiting the actor, and `last_external_at` is when any human other
+    than the actor last engaged at all, which is a different question: a pull
+    request nobody has touched for a month has nothing awaiting a response and
+    is still stuck. `updatedAt` cannot stand in for the second, because the
+    actor's own pushes reset it.
     """
     by_id = {pr["id"]: pr for pr in prs}
     ids = list(by_id)
     for i in range(0, len(ids), batch):
-        args = ["api", "graphql", "-f", f"query={RESPONSE_ACTIVITY}"]
+        args = ["api", "graphql", "-f", f"query={TIMELINE}"]
         for node_id in ids[i : i + batch]:
             args += ["-f", f"ids[]={node_id}"]
         nodes = json.loads(_gh(args))["data"]["nodes"]
         for node in nodes or []:
-            if node and node.get("id") in by_id:
-                if node.get("state") != "OPEN":
-                    by_id[node["id"]]["state"] = node.get("state")
-                    by_id[node["id"]]["response_needed"] = False
-                    continue
-                status = _response_status(
-                    node,
-                    actor,
-                    ignore_authors=ignore_authors,
-                    ignore_body_prefixes=ignore_body_prefixes,
-                )
-                by_id[node["id"]]["response_activity"] = status
-                by_id[node["id"]]["response_needed"] = status is not None
+            if not node or node.get("id") not in by_id:
+                continue
+            pr = by_id[node["id"]]
+            pr["state"] = node.get("state")
+            if node.get("labels"):
+                pr["labels"] = node["labels"]
+            for field_name in ("isDraft", "reviewDecision", "updatedAt", "commits"):
+                if node.get(field_name) is not None:
+                    pr[field_name] = node[field_name]
+            # `resolve_mergeable` waits for GitHub to compute this; do not undo
+            # that work with the UNKNOWN a fresh read comes back with.
+            if node.get("mergeable") and node["mergeable"] != "UNKNOWN":
+                pr["mergeable"] = node["mergeable"]
+
+            if node.get("state") != "OPEN":
+                pr["response_needed"] = False
+                pr["response_activity"] = None
+                pr["last_external_at"] = None
+                continue
+
+            events, latest_push = _timeline_events(node)
+            external = _external(events, actor, ignore_authors=ignore_authors,
+                                 ignore_body_prefixes=ignore_body_prefixes)
+            latest = max(external, key=lambda event: event["at"], default=None)
+            status = _response_status(
+                node, actor,
+                ignore_authors=ignore_authors,
+                ignore_body_prefixes=ignore_body_prefixes,
+            )
+            pr["response_activity"] = status
+            pr["response_needed"] = status is not None
+            pr["last_external_at"] = latest["at"] if latest else None
+            pr["last_external_author"] = (
+                (latest.get("author") or {}).get("login") if latest else None
+            )
+            pr["latest_own_at"] = latest_push or None
+
+
+def resolve_response_activity(prs: list[dict[str, Any]], actor: str, *,
+                              ignore_authors: frozenset[str] = frozenset(),
+                              ignore_body_prefixes: tuple[str, ...] = (),
+                              batch: int = 40) -> None:
+    """Attach whether each PR has newer human feedback awaiting the actor."""
+    resolve_timeline(prs, actor, ignore_authors=ignore_authors,
+                     ignore_body_prefixes=ignore_body_prefixes, batch=batch)
+
+
+def resolve_review_comment_bodies(prs: list[dict[str, Any]], actor: str, *,
+                                  ignore_authors: frozenset[str] = frozenset(),
+                                  ignore_body_prefixes: tuple[str, ...] = (),
+                                  batch: int = 20) -> None:
+    """Recover inline review-comment text where the excerpt came back empty.
+
+    `TIMELINE` deliberately omits the one nested connection GitHub charges for,
+    which is also the only place inline review-comment bodies live. A reviewer
+    who left inline notes and no summary therefore registers with the right
+    author and timestamp but nothing quotable. This buys the text back for
+    exactly those pull requests, which is a handful rather than all of them.
+    """
+    wanted = {
+        pr["id"]: pr
+        for pr in prs
+        if (pr.get("response_activity") or {}).get("kind") == "review"
+        and not (pr.get("response_activity") or {}).get("excerpt")
+    }
+    ids = list(wanted)
+    for i in range(0, len(ids), batch):
+        args = ["api", "graphql", "-f", f"query={REVIEW_COMMENT_BODIES}"]
+        for node_id in ids[i : i + batch]:
+            args += ["-f", f"ids[]={node_id}"]
+        try:
+            nodes = json.loads(_gh(args))["data"]["nodes"]
+        except (RuntimeError, KeyError, TypeError):
+            return  # An excerpt is a nicety; never fail a collection for one.
+        for node in nodes or []:
+            if not node or node.get("id") not in wanted:
+                continue
+            pr = wanted[node["id"]]
+            status = pr["response_activity"]
+            comments = [
+                {**comment, "at": comment.get("createdAt")}
+                for thread in (node.get("reviewThreads") or {}).get("nodes") or []
+                for comment in (thread.get("comments") or {}).get("nodes") or []
+                if comment.get("createdAt") and comment.get("body")
+            ]
+            external = _external(comments, actor, ignore_authors=ignore_authors,
+                                 ignore_body_prefixes=ignore_body_prefixes)
+            fresh = [c for c in external if c["at"] > str(status.get("latest_own") or "")]
+            if not fresh:
+                continue
+            latest = max(fresh, key=lambda comment: comment["at"])
+            status["kind"] = "review comment"
+            status["excerpt"] = " ".join(str(latest.get("body") or "").split())[:300]
+            status["url"] = latest.get("url") or status.get("url")
 
 
 def _needs_response(pr: dict[str, Any]) -> bool:
@@ -321,15 +503,23 @@ def run_github_search(spec: MonitorSpec, cfg: Config) -> MonitorReport:
                 for value in raw.get("response_ignore_repositories") or []
             ),
         )
+        ignore_authors = frozenset(
+            str(value) for value in raw.get("response_ignore_authors") or []
+        )
+        ignore_prefixes = tuple(
+            str(value) for value in raw.get("response_ignore_body_prefixes") or []
+        )
         resolve_response_activity(
             response_prs,
             actor,
-            ignore_authors=frozenset(
-                str(value) for value in raw.get("response_ignore_authors") or []
-            ),
-            ignore_body_prefixes=tuple(
-                str(value) for value in raw.get("response_ignore_body_prefixes") or []
-            ),
+            ignore_authors=ignore_authors,
+            ignore_body_prefixes=ignore_prefixes,
+        )
+        resolve_review_comment_bodies(
+            [pr for pr in response_prs if pr.get("response_needed")],
+            actor,
+            ignore_authors=ignore_authors,
+            ignore_body_prefixes=ignore_prefixes,
         )
     m = metrics_for(prs, now)
 
