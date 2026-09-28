@@ -234,3 +234,26 @@ def test_existing_work_rows_gain_session_backend_columns(tmp_path):
     assert work.session_name == "pid:10"
     assert work.session_backend == ""
     assert work.session_cwd == ""
+
+
+def test_a_marker_that_never_leaves_starting_is_retired(tmp_path):
+    # A launcher from before lifecycle markers could never write `active`, and
+    # the row it left was reopened, promptless, eighteen days later.
+    store = Store(tmp_path / "xa.db")
+    marker = tmp_path / "work.state"
+    marker.write_text("starting\n")
+    store.start_work("m/k", "s1", "m", "fix", "claude", str(marker), started_at=NOW)
+
+    assert reconcile(store) == []
+    assert store.work_for("m/k", "s1", "fix").status == "failed"
+    assert store.unfinished_work_for("m/k", "fix") is None
+
+
+def test_a_fresh_starting_marker_is_left_alone(tmp_path):
+    store = Store(tmp_path / "xa.db")
+    marker = tmp_path / "work.state"
+    marker.write_text("starting\n")
+    store.start_work("m/k", "s1", "m", "fix", "claude", str(marker))
+
+    assert reconcile(store) == []
+    assert store.work_for("m/k", "s1", "fix").status == "starting"

@@ -421,7 +421,7 @@ def cmd_open(args) -> int:
     from .sessions import SessionError, attach as attach_session
     from .sessions import create as create_session
     from .sessions import describe_new, is_registered, new_name, owner_folder
-    from .work import adopted_session_alive
+    from .work import adopted_session_alive, stalled
 
     snapshot = _load_snapshot()
     item = _find(snapshot, args.item)
@@ -439,6 +439,12 @@ def cmd_open(args) -> int:
         previous = store.work_for(item["uid"], item["state_key"], action.id)
         if previous is None or previous.status == "failed":
             previous = store.unfinished_work_for(item["uid"], action.id)
+        # Not left to the daemon's next reconcile: this row is the one about to
+        # be reopened, without a prompt, into a session that never existed.
+        if previous is not None and stalled(previous):
+            if not (args.dry_run or args.show_prompt):
+                store.retire_work_if_current(previous, "failed")
+            previous = None
         reopening = (
             previous is not None
             and previous.action == action.id

@@ -9,7 +9,7 @@ not honestly promise: acknowledging something opens no socket at all.
 
 import json
 import socket
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -354,3 +354,36 @@ def test_open_attaches_an_existing_durable_session_without_creating_one(
     assert cli.main(["open", "m/k"]) == 0
     assert attached == [("ai-claude-test-3", original_cwd)]
     assert "Reopening fix it" in capsys.readouterr().out
+
+
+def test_open_does_not_reopen_an_escalation_that_never_started(
+    home, monkeypatch, capsys
+):
+    (home / "policy" / "config.toml").write_text(
+        CONFIG
+        + f'''\n[[monitor.m.actions]]
+id = "fix"
+label = "Fix it"
+agent = "claude"
+cwd = {json.dumps(str(home))}
+target = "some-branch"
+prompt = "prompts/fix.md"
+'''
+    )
+    (home / "policy" / "prompts").mkdir(exist_ok=True)
+    (home / "policy" / "prompts" / "fix.md").write_text("Fix the thing")
+    snapshot = json.loads(cli.snapshot_path().read_text())
+    snapshot["items"][0]["actions"] = ["fix"]
+    cli.snapshot_path().write_text(json.dumps(snapshot))
+    monkeypatch.setattr("xa.actions.WT", home)
+    marker = home / "old.state"
+    marker.write_text("starting\n")
+    Store(cli.db_path()).start_work(
+        "m/k", "an-older-state", "m", "fix", "claude", str(marker),
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert cli.main(["open", "m/k", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "WT_CLAUDE_PROMPT" in out
+    assert "Reopening" not in out
