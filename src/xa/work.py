@@ -13,6 +13,12 @@ from .store import Store
 
 ACTIVE = ("starting", "active")
 
+# How long a launched agent has to write `active` into its lifecycle marker.
+# The launcher writes it the moment the editor runs the agent, so ten minutes
+# is generous; after that the launch did not happen, and there is nothing to go
+# back to.
+MARKER_GRACE = 600
+
 
 def _stored_work(row) -> WorkSession | None:
     if row is None:
@@ -61,6 +67,23 @@ def marker_state(work: WorkSession) -> str | None:
     return state if state in ("starting", "active", "finished") else None
 
 
+def stalled(work: WorkSession) -> bool:
+    """A launch whose agent never started, and never will.
+
+    Its marker still says `starting` long after the launch, which happens when
+    the editor never ran the agent, or when the launcher predates markers and
+    so could never have written one. Left alone such a row is reopened forever,
+    and a reopen has no prompt to give: it lands in a resume picker, or in a
+    window that is already open and so runs nothing at all.
+    """
+    return (
+        bool(work.marker)
+        and work.status == "starting"
+        and marker_state(work) in ("starting", None)
+        and (utcnow() - work.updated_at).total_seconds() >= MARKER_GRACE
+    )
+
+
 def tmux_alive(session_name: str) -> bool:
     socket = Path(os.environ.get(
         "AI_TMUX_SOCKET", "~/.local/state/ai-tmux/tmux.sock"
@@ -98,6 +121,9 @@ def reconcile(store: Store) -> list[WorkSession]:
             and not work.marker
             and (utcnow() - work.started_at).total_seconds() >= 60
         ):
+            store.retire_work_if_current(work, "failed")
+            continue
+        if stalled(work):
             store.retire_work_if_current(work, "failed")
             continue
         state = marker_state(work)
