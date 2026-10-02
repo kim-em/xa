@@ -355,6 +355,23 @@ def resolve_timeline(prs: list[dict[str, Any]], actor: str, *,
                 (latest.get("author") or {}).get("login") if latest else None
             )
             pr["latest_own_at"] = latest_push or None
+            # A CHANGES_REQUESTED decision outlives the review that set it, so
+            # the decision alone cannot say whose move it is. These two can:
+            # once the actor has pushed or written since the latest such
+            # review, the move is the reviewer's. None means the review is not
+            # in the timeline window, and is left to the caller to read.
+            pr["changes_requested_at"] = max(
+                (event["at"] for event in events
+                 if event.get("kind") == "review"
+                 and event.get("state") == "CHANGES_REQUESTED"
+                 and (event.get("author") or {}).get("login") != actor),
+                default=None,
+            )
+            pr["latest_answer_at"] = max(
+                [latest_push, *(event["at"] for event in events
+                                if (event.get("author") or {}).get("login") == actor)],
+                default="",
+            ) or None
 
 
 def resolve_response_activity(prs: list[dict[str, Any]], actor: str, *,

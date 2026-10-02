@@ -329,3 +329,28 @@ def test_inline_comment_text_is_bought_back_for_a_bodiless_review(monkeypatch):
     assert pr["response_activity"]["kind"] == "review comment"
     assert pr["response_activity"]["excerpt"] == "Rename this argument"
     assert pr["response_activity"]["url"] == "https://example.test/thread/1"
+
+
+def test_changes_requested_records_when_it_was_asked_and_answered(monkeypatch):
+    pr = pr_with_activity(events=[
+        review("reviewer", "2026-08-26T11:00:00Z", state="CHANGES_REQUESTED"),
+        push("2026-08-26T12:00:00Z"),
+        comment("kim-em", "2026-08-26T13:00:00Z", "Done"),
+    ])
+    _stub_nodes(monkeypatch, [dict(pr)])
+
+    github.resolve_timeline([pr], "kim-em")
+
+    assert pr["changes_requested_at"] == "2026-08-26T11:00:00Z"
+    assert pr["latest_answer_at"] == "2026-08-26T13:00:00Z"
+
+
+def test_a_dismissed_changes_request_is_not_recorded(monkeypatch):
+    pr = pr_with_activity(events=[
+        review("reviewer", "2026-08-26T11:00:00Z", state="DISMISSED"),
+    ])
+    _stub_nodes(monkeypatch, [dict(pr)])
+
+    github.resolve_timeline([pr], "kim-em")
+
+    assert pr["changes_requested_at"] is None
