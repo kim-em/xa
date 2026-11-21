@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 from datetime import timedelta
@@ -986,9 +987,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "command", None) is None:
-        return cmd_status(args)
-    return args.func(args)
+    try:
+        if getattr(args, "command", None) is None:
+            return cmd_status(args)
+        return args.func(args)
+    except sqlite3.OperationalError as exc:
+        # Extended codes such as SQLITE_BUSY_SNAPSHOT share the low byte.
+        code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+        if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise
+        raise SystemExit("xa: state database is busy; try again shortly") from None
 
 
 if __name__ == "__main__":

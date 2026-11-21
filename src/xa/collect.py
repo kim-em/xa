@@ -384,9 +384,9 @@ def collect(
             if raw["monitor"] not in fresh:
                 collected.append(MonitorReport.from_json(raw))
 
-    # Everything that ages out. These are cheap deletes on a small database,
-    # and the alternative is a table nobody ever prunes: `forget_plans` existed
-    # for months with no caller, which meant a state that changed and later
+    # Everything that ages out. History and runs have retention indexes so a
+    # tick does not scan the full history under the writer lock. `forget_plans`
+    # existed for months with no caller, which meant a state that changed and later
     # came back silently reattached an arbitrarily old investigation.
     store.prune_suppressions(now)
     store.forget_plans()
