@@ -90,7 +90,7 @@ Carica is a Mac Studio that stays awake, so the sleep gaps that came with
 collecting on a laptop are gone. The LaunchDaemon starts at boot and runs as
 `kim`, without depending on a GUI login. A monitor that fails is retried after
 five minutes rather than its full interval, backing off by doubling while it
-keeps failing (at least 30 minutes after a GitHub rate limit).
+keeps failing (to at most six hours) (to at most six hours) (at least 30 minutes after a GitHub rate limit).
 
 ## Working here
 
