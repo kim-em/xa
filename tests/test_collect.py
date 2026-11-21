@@ -207,6 +207,48 @@ def test_the_retry_never_slows_a_monitor_down(tmp_path):
     assert due(s, st, now)
 
 
+def failing(tmp_path, name, ages, error="HTTP 404", interval=timedelta(weeks=1)):
+    """A store whose monitor failed at each of `ages` (oldest first) before now."""
+    (tmp_path / name).mkdir()
+    st, now = store(tmp_path / name), utcnow()
+    for age in ages:
+        st.record_run("m", now - age, False, error, 1)
+    return st, spec("m", interval=interval), now
+
+
+def test_repeated_failures_back_off(tmp_path):
+    """A monitor that keeps failing is broken, not unlucky.
+
+    A weekly scan that failed every run was retried every five minutes for
+    five weeks, spending hundreds of GitHub requests on each attempt.
+    """
+    m = timedelta(minutes=1)
+    st, s, now = failing(tmp_path, "fourth", [300 * m, 200 * m, 100 * m, 39 * m])
+    assert not due(s, st, now)                 # four in a row: wait 40 minutes
+    st, s, now = failing(tmp_path, "waited", [300 * m, 200 * m, 100 * m, 41 * m])
+    assert due(s, st, now)
+
+    st, s, now = failing(tmp_path, "reset", [300 * m, 200 * m, 100 * m])
+    st.record_run("m", now - 10 * m, True, None, 1)
+    st.record_run("m", now - 6 * m, False, "HTTP 404", 1)
+    assert due(s, st, now)                     # a success resets the streak
+
+
+def test_backoff_never_exceeds_the_interval(tmp_path):
+    ages = [timedelta(minutes=n) for n in range(400, 30, -30)]
+    st, s, now = failing(tmp_path, "m", ages, interval=timedelta(minutes=30))
+    assert due(s, st, now)                     # last failure was 40 minutes ago
+
+
+def test_rate_limited_failures_wait_for_the_quota(tmp_path):
+    """Retrying into an exhausted quota competes with every other monitor."""
+    limit = "gh: API rate limit exceeded for user ID 1"
+    st, s, now = failing(tmp_path, "soon", [timedelta(minutes=10)], limit, timedelta(hours=6))
+    assert not due(s, st, now)
+    st, s, now = failing(tmp_path, "later", [timedelta(minutes=31)], limit, timedelta(hours=6))
+    assert due(s, st, now)
+
+
 def test_changed_options_also_make_a_monitor_due(tmp_path):
     st = store(tmp_path)
     (tmp_path / "monitors").mkdir()

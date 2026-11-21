@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Sequence
 
 # Transient network failures that deserve a retry rather than a crash. Fanning
@@ -90,6 +91,42 @@ def job_status(name: str) -> dict[str, Any] | None:
     from xa.jobs import read_status
 
     return read_status(name)
+
+
+def state_path() -> Path:
+    """Where this monitor keeps what it has already read, between runs."""
+    from xa.config import state_dir
+
+    name = os.environ.get("XA_MONITOR")
+    if not name:
+        raise RuntimeError("XA_MONITOR is not set; persistent state needs a monitor name")
+    return state_dir() / "monitors" / f"{name}.json"
+
+
+def load_state(default: Any = None) -> Any:
+    """The state this monitor saved last time, or `default` on its first run.
+
+    A cursor is what keeps a monitor's cost proportional to what changed rather
+    than to everything in its window. An unreadable file is a first run, not a
+    failure: the state is a cache of reads that can always be repeated.
+    """
+    try:
+        return json.loads(state_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def save_state(data: Any) -> None:
+    """Replace this monitor's saved state atomically.
+
+    Save as progress is made, not only at the end: a run that times out part
+    of the way through should leave its successor less to do.
+    """
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, sort_keys=True))
+    os.replace(tmp, path)
 
 
 def digest(*parts: Any) -> str:

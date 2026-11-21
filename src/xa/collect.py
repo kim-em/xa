@@ -195,10 +195,33 @@ def effective_policies(cfg: Config, store: Store | None) -> dict[str, MonitorPol
     return policies
 
 
-# How long to wait before retrying a monitor that failed. Short, because the
-# usual cause is a network that was not up yet, and the cost of being wrong is
-# one more timeout.
+# How long to wait before retrying a monitor that failed once. Short, because
+# the usual cause is a network that was not up yet, and the cost of being wrong
+# is one more timeout.
 RETRY_AFTER = timedelta(minutes=5)
+
+# A monitor that keeps failing is not waiting for the network. Each further
+# failure doubles the wait, never beyond the monitor's own interval. A weekly
+# scan that failed every time used to be retried every five minutes for five
+# weeks, and each attempt spent hundreds of GitHub requests on the way to
+# failing again.
+RETRY_DOUBLINGS = 10
+
+# GitHub's quota refills on an hourly window. Retrying sooner than this only
+# competes with every other monitor for whatever is left.
+RATE_LIMITED_RETRY = timedelta(minutes=30)
+
+
+def rate_limited(error: str | None) -> bool:
+    return bool(error) and "rate limit" in error.casefold()
+
+
+def retry_delay(spec: MonitorSpec, streak: int, error: str | None) -> timedelta:
+    """How long after its last run a failing monitor waits before the next."""
+    delay = RETRY_AFTER * 2 ** min(max(streak - 1, 0), RETRY_DOUBLINGS)
+    if rate_limited(error):
+        delay = max(delay, RATE_LIMITED_RETRY)
+    return min(spec.interval, delay)
 
 
 def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None) -> bool:
@@ -208,17 +231,22 @@ def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None
     interval to see the effect of an edit is friction that stops you fixing a
     noisy check.
 
-    A monitor whose last run *failed* is due again after `RETRY_AFTER` rather
-    than its full interval. The collector runs on a laptop, which wakes with no
-    network for a few seconds every day; without this, one badly-timed failure
-    leaves a six-hourly check reading `unknown` for six hours.
+    A monitor whose last run *failed* is due again sooner than its full
+    interval. The collector runs on a laptop, which wakes with no network for a
+    few seconds every day; without this, one badly-timed failure leaves a
+    six-hourly check reading `unknown` for six hours. Repeated failures back
+    off (see `retry_delay`), so a monitor that is broken rather than unlucky
+    does not hammer whatever it reads.
     """
     if root is not None and store.fingerprint(spec.name) != spec.fingerprint(root):
         return True
     last, ok = store.last_run(spec.name)
     if last is None:
         return True
-    return (now - last) >= (spec.interval if ok else min(spec.interval, RETRY_AFTER))
+    if ok:
+        return (now - last) >= spec.interval
+    streak, error = store.failure_streak(spec.name)
+    return (now - last) >= retry_delay(spec, streak, error)
 
 
 def build_snapshot(reports: list[MonitorReport], cfg: Config, store: Store,
