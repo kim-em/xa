@@ -234,6 +234,13 @@ def test_repeated_failures_back_off(tmp_path):
     assert due(s, st, now)                     # a success resets the streak
 
 
+def test_a_long_failure_streak_still_retries_within_hours(tmp_path):
+    """Weeks of failures before a fix must not hide the fix for days."""
+    ages = [timedelta(hours=n) for n in range(800, 7, -1)]
+    st, s, now = failing(tmp_path, "m", ages)
+    assert due(s, st, now)                     # last failure was 7 hours ago
+
+
 def test_backoff_never_exceeds_the_interval(tmp_path):
     ages = [timedelta(minutes=n) for n in range(400, 30, -30)]
     st, s, now = failing(tmp_path, "m", ages, interval=timedelta(minutes=30))

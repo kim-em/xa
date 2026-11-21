@@ -123,7 +123,7 @@ is written here.
 
 A monitor that fails is retried in five minutes rather than after its full
 interval, which matters on a machine that wakes with no network. Each further
-failure in a row doubles the wait, never beyond the interval, and a GitHub
+failure in a row doubles the wait, never beyond the interval or six hours, and a GitHub
 rate-limit failure waits at least half an hour, so a broken monitor does not
 spend the quota every other monitor shares.
 

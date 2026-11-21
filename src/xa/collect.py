@@ -207,6 +207,12 @@ RETRY_AFTER = timedelta(minutes=5)
 # failing again.
 RETRY_DOUBLINGS = 10
 
+# The longest a failing monitor waits, whatever its interval. Failures that
+# predate a fix still count towards the streak, and without a ceiling a weekly
+# monitor that had failed for weeks would wait days before showing the fix
+# worked. Four attempts a day is cheap even for a monitor that stays broken.
+RETRY_CEILING = timedelta(hours=6)
+
 # GitHub's quota refills on an hourly window. Retrying sooner than this only
 # competes with every other monitor for whatever is left.
 RATE_LIMITED_RETRY = timedelta(minutes=30)
@@ -221,7 +227,7 @@ def retry_delay(spec: MonitorSpec, streak: int, error: str | None) -> timedelta:
     delay = RETRY_AFTER * 2 ** min(max(streak - 1, 0), RETRY_DOUBLINGS)
     if rate_limited(error):
         delay = max(delay, RATE_LIMITED_RETRY)
-    return min(spec.interval, delay)
+    return min(spec.interval, RETRY_CEILING, delay)
 
 
 def due(spec: MonitorSpec, store: Store, now: datetime, root: Path | None = None) -> bool:
