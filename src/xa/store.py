@@ -402,6 +402,24 @@ class Store:
         return (parse_ts(row["collected_at"]), bool(row["ok"])) if row else (None, True)
 
     @synchronised
+    def failure_streak(self, monitor: str, limit: int = 64) -> tuple[int, str | None]:
+        """How many of this monitor's most recent runs failed in a row, and why
+        the latest one did.
+
+        The count is what backs a retry off. See `collect.due`.
+        """
+        rows = self.db.execute(
+            "SELECT ok, error FROM runs WHERE monitor = ? ORDER BY collected_at DESC LIMIT ?",
+            (monitor, limit),
+        ).fetchall()
+        streak = 0
+        for row in rows:
+            if row["ok"]:
+                break
+            streak += 1
+        return streak, (rows[0]["error"] if rows and not rows[0]["ok"] else None)
+
+    @synchronised
     def metric_series(self, monitor: str, key: str, metric: str, since: datetime) -> list[tuple[datetime, float]]:
         """Past values of one metric, for trend detection."""
         rows = self.db.execute(

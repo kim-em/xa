@@ -98,6 +98,11 @@ The contract:
   fetch belongs in `evidence`, gathered now while it is cheap. This is also what
   keeps reads instant.
 - Fail loudly. A crashed monitor reports `unknown`; it never reports health.
+- Pay for what changed, not for the whole window. A monitor that rereads a week
+  of history on every run should keep a cursor instead: `lib.load_state()` and
+  `lib.save_state()` persist one JSON document per monitor under
+  `$XA_STATE/monitors/`. Save as you go, so a run that times out leaves its
+  successor less to do.
 
 ## Running it continuously
 
@@ -117,7 +122,10 @@ collector is asleep, nothing collects; the header age tells you so, because it
 is written here.
 
 A monitor that fails is retried in five minutes rather than after its full
-interval, which matters on a machine that wakes with no network.
+interval, which matters on a machine that wakes with no network. Each further
+failure in a row doubles the wait, never beyond the interval, and a GitHub
+rate-limit failure waits at least half an hour, so a broken monitor does not
+spend the quota every other monitor shares.
 
 ```sh
 xa tui                       # the same verbs, one keystroke each
