@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS history (
     metrics   TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS history_lookup ON history (monitor, key, ts);
+-- Retention runs on every tick. Without a timestamp-leading index its DELETE
+-- scans all history while holding the database's only writer lock.
+CREATE INDEX IF NOT EXISTS history_prune ON history (ts);
 
 -- When the current continuous occurrence of a (monitor, key, state_key) was
 -- first observed. Monitors often cannot know when a condition began: a disk
@@ -81,6 +84,7 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_ms  INTEGER
 );
 CREATE INDEX IF NOT EXISTS runs_lookup ON runs (monitor, collected_at);
+CREATE INDEX IF NOT EXISTS runs_prune ON runs (collected_at);
 
 -- The most recent report from each monitor, kept so the snapshot survives ticks
 -- where nothing was due. Rebuilding it from only what just ran would erase every
